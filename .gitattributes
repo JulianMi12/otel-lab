@@ -1,0 +1,23 @@
+# Normalización de fin de línea.
+#
+# Git en Windows convierte a CRLF al hacer checkout. Un script .sh con CRLF
+# falla dentro de un contenedor Linux con "bad interpreter: No such file or
+# directory", igual que un Dockerfile o un YAML que se monta en un contenedor.
+# Estas reglas fuerzan LF en todo lo que se ejecuta o se monta en Linux.
+
+* text=auto eol=lf
+
+*.sh        text eol=lf
+*.py        text eol=lf
+*.js        text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.sql       text eol=lf
+*.tf        text eol=lf
+*.json      text eol=lf
+Dockerfile  text eol=lf
+
+# Binarios: sin conversión.
+*.png  binary
+*.jpg  binary
+*.pdf  binary
