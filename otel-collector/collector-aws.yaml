@@ -1,0 +1,137 @@
+# ════════════════════════════════════════════════════════════════════════════
+# OTel Collector — configuración del despliegue en AWS (ECS Fargate)
+#
+# El Collector corre como contenedor sidecar dentro de la misma task de ECS que
+# la aplicación. En Fargate con red awsvpc los contenedores de una task
+# comparten la interfaz de red, por lo que la app exporta a localhost:4317.
+#
+#   ┌──────────── ECS Task (Fargate) ────────────┐
+#   │  [ app ] ──OTLP──▶ localhost:4317          │
+#   │                      [ otel-collector ]    │──▶ AWS X-Ray
+#   │                                            │──▶ CloudWatch Logs
+#   └────────────────────────────────────────────┘──▶ CloudWatch Metrics (EMF)
+#
+# Notas de implementación:
+#   - El exporter awsxray traduce los spans de OTel al modelo de segmentos de
+#     X-Ray. El trace_id se reescribe al formato propio de X-Ray
+#     (1-<8 hex de timestamp>-<24 hex>), derivado del mismo trace_id W3C.
+#   - El exporter awsemf publica métricas usando Embedded Metric Format, que
+#     CloudWatch ingiere sin necesidad de un agente adicional.
+#   - La autenticación es implícita vía el task role de ECS: no hay llaves.
+# ════════════════════════════════════════════════════════════════════════════
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 32
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 96
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+
+  # ── resourcedetection: metadatos nativos de ECS ───────────────────────────
+  # El detector ecs consulta el endpoint de metadatos de la task (v4) y añade
+  # cluster, task ARN, familia de la task y zona de disponibilidad. Sin esto,
+  # X-Ray no puede agrupar los segmentos por servicio en el mapa.
+  resourcedetection:
+    detectors: [env, ecs, ec2]
+    timeout: 10s
+    override: false
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:ENVIRONMENT}
+        action: upsert
+      - key: cloud.provider
+        value: aws
+        action: upsert
+
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["http.route"] == "/health"'
+        - 'name == "GET /health"'
+
+exporters:
+  # ── AWS X-Ray: backend de trazas ──────────────────────────────────────────
+  awsxray:
+    region: ${env:AWS_REGION}
+    # Conserva los nombres de span originales de OTel en lugar de reescribirlos
+    # al formato de X-Ray: mantiene la paridad con lo que se ve en Jaeger local.
+    indexed_attributes:
+      - service.name
+      - deployment.environment
+      - order.id
+    telemetry:
+      enabled: true
+
+  # ── CloudWatch Logs ───────────────────────────────────────────────────────
+  awscloudwatchlogs:
+    region: ${env:AWS_REGION}
+    log_group_name: /otel-lab/services
+    log_stream_name: ${env:OTEL_SERVICE_NAME}
+    raw_log: false
+
+  # ── CloudWatch Metrics vía Embedded Metric Format ─────────────────────────
+  awsemf:
+    region: ${env:AWS_REGION}
+    namespace: OTelLab
+    log_group_name: /otel-lab/metrics
+    # Las dimensiones acotan la cardinalidad: CloudWatch cobra por métrica
+    # personalizada y cada combinación de dimensiones cuenta como una distinta.
+    dimension_rollup_option: NoDimensionRollup
+    resource_to_telemetry_conversion:
+      enabled: true
+    metric_declarations:
+      - dimensions: [[service.name], [service.name, endpoint]]
+        metric_name_selectors:
+          - "^http_requests.*"
+          - "^http_request_duration.*"
+          - "^db_query_duration.*"
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, filter/health, batch]
+      exporters: [awsxray]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [awsemf]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [awscloudwatchlogs]
+
+  telemetry:
+    logs:
+      level: info
+      encoding: json
+    metrics:
+      level: basic
+      address: 0.0.0.0:8888

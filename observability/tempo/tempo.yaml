@@ -1,0 +1,59 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Tempo — segundo backend de trazas (alternativa a Jaeger, nativo en Grafana)
+#
+# Se mantiene junto a Jaeger a propósito: Jaeger aporta la UI de referencia que
+# pide el entregable, y Tempo habilita el salto traza↔log↔métrica dentro de
+# Grafana sin cambiar de herramienta.
+# ════════════════════════════════════════════════════════════════════════════
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# metrics_generator deriva métricas RED (Rate, Errors, Duration) y el service
+# graph a partir de las trazas: es una tercera vía de correlación entre la
+# señal de trazas y la de métricas.
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      cluster: otel-lab
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+  traces_storage:
+    path: /var/tempo/generator/traces
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]
+
+usage_report:
+  reporting_enabled: false

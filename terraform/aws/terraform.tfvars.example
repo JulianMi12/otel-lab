@@ -1,0 +1,23 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Copiar a terraform.tfvars y completar. terraform.tfvars está en .gitignore.
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── Obligatoria ─────────────────────────────────────────────────────────────
+db_password = "cambiar-por-un-valor-seguro"
+
+# ── Opcionales (valores por defecto) ────────────────────────────────────────
+region       = "us-east-1"
+project_name = "otel-lab"
+environment  = "production"
+app_version  = "1.0.0"
+
+# El NAT Gateway cuesta ~32 USD/mes por AZ. Con false las tasks van en
+# subredes públicas con IP asignada, que es suficiente para el laboratorio.
+use_nat_gateway = false
+
+# db.t4g.micro entra en la capa gratuita de RDS durante los primeros 12 meses.
+enable_rds        = true
+db_instance_class = "db.t4g.micro"
+
+desired_count      = 1
+log_retention_days = 7

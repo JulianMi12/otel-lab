@@ -1,0 +1,32 @@
+# ─── Requisito de base ───────────────────────────────────────────────────────
+# setuptools 81 eliminó pkg_resources, que las versiones antiguas de
+# opentelemetry-instrumentation todavía importan al arrancar. El tope de
+# versión mantiene pkg_resources disponible como red de seguridad; a partir de
+# opentelemetry-instrumentation 0.48b0 la dependencia ya no existe.
+setuptools>=69.0.0,<81.0.0
+
+# ─── Runtime de la aplicación ────────────────────────────────────────────────
+fastapi==0.111.1
+uvicorn[standard]==0.30.3
+httpx==0.27.0
+psycopg2-binary==2.9.9
+python-json-logger==2.0.7
+
+# ─── OpenTelemetry SDK (API + implementación) ────────────────────────────────
+# Las versiones se fijan exactas: api/sdk/exporters/instrumentations deben ir
+# alineados o el bootstrap falla con errores de símbolos no encontrados.
+# La serie 1.27.0 / 0.48b0 es la primera que migra de pkg_resources a
+# importlib.metadata, por lo que funciona con setuptools moderno.
+opentelemetry-api==1.27.0
+opentelemetry-sdk==1.27.0
+opentelemetry-exporter-otlp-proto-grpc==1.27.0
+opentelemetry-exporter-prometheus==0.48b0
+prometheus-client==0.20.0
+
+# ─── Auto-instrumentación de librerías ───────────────────────────────────────
+opentelemetry-instrumentation==0.48b0
+opentelemetry-instrumentation-fastapi==0.48b0
+opentelemetry-instrumentation-asgi==0.48b0
+opentelemetry-instrumentation-httpx==0.48b0
+opentelemetry-instrumentation-psycopg2==0.48b0
+opentelemetry-semantic-conventions==0.48b0

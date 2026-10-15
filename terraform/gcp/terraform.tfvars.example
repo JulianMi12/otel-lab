@@ -1,0 +1,25 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Copiar a terraform.tfvars y completar con los valores de TU proyecto.
+# terraform.tfvars está en .gitignore: nunca debe subirse al repositorio.
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── Obligatorias ────────────────────────────────────────────────────────────
+project_id  = "mi-proyecto-gcp"          # gcloud config get-value project
+db_password = "cambiar-por-un-valor-seguro"
+
+# ── Opcionales (se muestran los valores por defecto) ────────────────────────
+region      = "us-central1"
+environment = "production"
+app_version = "1.0.0"
+
+# Cloud SQL es el único recurso con costo por hora continuo.
+# Ponerlo en false para desplegar solo Cloud Run y conservar créditos.
+enable_cloud_sql = true
+db_tier          = "db-f1-micro"
+
+# min_instances = 0 permite escalar a cero y no gastar en reposo.
+# Para el benchmark conviene subirlo a 1 y evitar el arranque en frío.
+min_instances = 0
+max_instances = 3
+
+trace_sampling_ratio = 1.0

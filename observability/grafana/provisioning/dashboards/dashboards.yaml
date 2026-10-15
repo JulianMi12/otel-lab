@@ -1,0 +1,16 @@
+# Carga automática de los dashboards versionados en el repositorio.
+# Los dashboards viven como JSON en git: se reconstruyen desde cero en
+# cualquier máquina sin depender del estado interno de Grafana.
+apiVersion: 1
+
+providers:
+  - name: otel-lab
+    orgId: 1
+    folder: "OTel Lab"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 15
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

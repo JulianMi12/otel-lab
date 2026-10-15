@@ -1,0 +1,134 @@
+# ════════════════════════════════════════════════════════════════════════════
+# OTel Collector — configuración del despliegue en GCP (Cloud Run)
+#
+# El Collector corre como contenedor SIDECAR dentro del mismo servicio de
+# Cloud Run que la aplicación. Ambos comparten el espacio de red del pod, por
+# lo que la app exporta a localhost:4317 sin exponer ningún puerto al exterior.
+#
+#   ┌──────────── Cloud Run service ─────────────┐
+#   │  [ app ] ──OTLP──▶ localhost:4317          │
+#   │                      [ otel-collector ]    │──▶ Cloud Trace
+#   │                                            │──▶ Cloud Logging
+#   └────────────────────────────────────────────┘──▶ Managed Prometheus
+#
+# Diferencia clave con collector-local.yaml: aquí no hay backends propios.
+# Los exporters hablan con los servicios gestionados de GCP y la autenticación
+# es implícita, vía la service account adjunta al servicio de Cloud Run.
+# ════════════════════════════════════════════════════════════════════════════
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 32
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    # Ajustado al límite de memoria del sidecar definido en Terraform
+    # (var.collector_memory). Si el Collector agota la memoria, Cloud Run
+    # reinicia la instancia COMPLETA, tirando también la aplicación.
+    limit_mib: 384
+    spike_limit_mib: 96
+
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+
+  # ── resourcedetection: metadatos nativos de Cloud Run ─────────────────────
+  # El detector gcp consulta el metadata server y añade project_id, region,
+  # revision y nombre del servicio. Es lo que permite que Cloud Trace y Cloud
+  # Logging asocien la telemetría al recurso correcto de la consola.
+  resourcedetection:
+    detectors: [env, gcp]
+    timeout: 10s
+    override: false
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:ENVIRONMENT}
+        action: upsert
+      - key: cloud.provider
+        value: gcp
+        action: upsert
+
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["http.route"] == "/health"'
+        - 'name == "GET /health"'
+
+  # ── transform: normaliza la severidad para Cloud Logging ──────────────────
+  # Sin un severity_number válido, Cloud Logging clasifica todos los registros
+  # como DEFAULT y se pierde la capacidad de filtrar por nivel en la consola.
+  transform/logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(severity_text, "INFO") where severity_number == 0
+
+exporters:
+  # ── Cloud Trace: backend de trazas gestionado ─────────────────────────────
+  googlecloud:
+    project: ${env:GCP_PROJECT_ID}
+    log:
+      default_log_name: otel-lab
+    trace:
+      endpoint: cloudtrace.googleapis.com:443
+    # Sin credenciales explícitas: usa las Application Default Credentials de
+    # la service account adjunta al servicio de Cloud Run.
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+    sending_queue:
+      enabled: true
+      queue_size: 1000
+
+  # ── Google Managed Prometheus: métricas gestionadas ───────────────────────
+  # Se prefiere al exporter googlecloud para métricas porque conserva el modelo
+  # de datos de Prometheus (histogramas y labels), lo que permite reutilizar
+  # las mismas queries PromQL del dashboard local sin reescribirlas.
+  googlemanagedprometheus:
+    project: ${env:GCP_PROJECT_ID}
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, filter/health, batch]
+      exporters: [googlecloud]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, batch]
+      exporters: [googlemanagedprometheus]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, resource, transform/logs, batch]
+      exporters: [googlecloud]
+
+  telemetry:
+    logs:
+      level: info
+      encoding: json
+    metrics:
+      level: basic
+      address: 0.0.0.0:8888

@@ -1,0 +1,252 @@
+# ════════════════════════════════════════════════════════════════════════════
+# OTel Collector — configuración del entorno LOCAL (Docker Compose)
+#
+# Flujo de datos de las tres señales:
+#
+#   service-a / service-b  ──OTLP gRPC :4317──┐
+#                                             │
+#                            ┌────────────────▼────────────────┐
+#                            │  memory_limiter → resource →    │
+#                            │  resourcedetection → filter →   │
+#                            │  attributes → batch             │
+#                            └────────────────┬────────────────┘
+#                                             │
+#        ┌────────────────────┬───────────────┼────────────────┐
+#        ▼                    ▼               ▼                ▼
+#    Jaeger (trazas)    Tempo (trazas)   Prometheus :8889   Loki (logs)
+#
+# Diferencias con collector-gcp.yaml: aquí los backends son contenedores
+# locales; en GCP los exporters apuntan a Cloud Trace y Cloud Logging.
+# ════════════════════════════════════════════════════════════════════════════
+
+extensions:
+  # Health check: docker compose espera este endpoint antes de arrancar las apps.
+  health_check:
+    endpoint: 0.0.0.0:13133
+  # pprof: perfilado del propio Collector, usado en el análisis de overhead.
+  pprof:
+    endpoint: 0.0.0.0:1777
+  # zPages: inspección en vivo de los pipelines (http://localhost:55679/debug/tracez)
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+receivers:
+  # ── OTLP: el protocolo nativo con el que hablan los SDK ───────────────────
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        # 32 MiB: bajo carga de benchmark los lotes de spans crecen y el
+        # límite por defecto (4 MiB) provoca rechazos.
+        max_recv_msg_size_mib: 32
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins: ["*"]
+
+  # ── Nota sobre las métricas internas del Collector ────────────────────────
+  # NO se scrapean desde aquí. Hacerlo las metería en el mismo pipeline que las
+  # métricas de las aplicaciones, donde el exporter tiene activado
+  # resource_to_telemetry_conversion: los resource attributes se convertirían
+  # en labels que chocan con los que las métricas internas ya traen (job,
+  # instance, service_name) y el exporter las descarta con
+  # "duplicate label names in constant and variable labels".
+  #
+  # En su lugar, Prometheus scrapea el puerto 8888 directamente
+  # (job otel-collector-internal en prometheus.yaml). Esas son las series que
+  # alimentan el panel de errores del Collector en el dashboard.
+
+  # ── docker_stats: CPU y memoria REALES por contenedor ─────────────────────
+  # Es la fuente de datos del benchmark de overhead: permite comparar el consumo
+  # de los servicios con y sin instrumentación sin instalar un agente extra.
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 10s
+    timeout: 20s
+    api_version: "1.44"
+    metrics:
+      container.cpu.utilization:
+        enabled: true
+      container.memory.usage.total:
+        enabled: true
+      container.memory.percent:
+        enabled: true
+      container.network.io.usage.rx_bytes:
+        enabled: true
+      container.network.io.usage.tx_bytes:
+        enabled: true
+
+processors:
+  # ── memory_limiter: SIEMPRE el primero del pipeline ───────────────────────
+  # Si se coloca después de batch, el batch ya habría acumulado la memoria que
+  # se intenta limitar. Aplica contrapresión antes de que el Collector muera.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # ── batch: agrupa señales para reducir llamadas de red al backend ─────────
+  # Va al FINAL del pipeline, justo antes de los exporters.
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # ── resource: atributos comunes a las tres señales ────────────────────────
+  # Al aplicarse sobre trazas, métricas y logs por igual, estos atributos son
+  # los que permiten filtrar las tres señales por el mismo criterio en Grafana.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:ENVIRONMENT}
+        action: upsert
+      - key: cloud.region
+        value: ${env:CLOUD_REGION}
+        action: upsert
+      - key: collector.version
+        value: "0.103.0"
+        action: insert
+
+  # ── resourcedetection: enriquece con metadatos del entorno ────────────────
+  # En local solo env/system/docker: los detectores gcp y ecs consultan metadata
+  # servers inexistentes aquí y añadirían un timeout a cada arranque.
+  resourcedetection:
+    detectors: [env, system, docker]
+    timeout: 5s
+    override: false
+
+  # ── filter: descarta el ruido de los health checks ────────────────────────
+  # Los sondeos de liveness se ejecutan cada 10s por contenedor; sin este filtro
+  # dominarían el volumen de trazas sin aportar información de negocio.
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["http.route"] == "/health"'
+        - 'attributes["url.path"] == "/health"'
+        - 'name == "GET /health"'
+
+  # ── attributes: control de cardinalidad en métricas ───────────────────────
+  # Cada combinación distinta de labels crea una serie temporal nueva en
+  # Prometheus. http.flavor y user_agent no aportan valor analítico y
+  # multiplican el número de series.
+  attributes/metrics:
+    actions:
+      - key: http.flavor
+        action: delete
+      - key: user_agent.original
+        action: delete
+
+  # ── transform: expone el trace_id como atributo explícito del log ─────────
+  # Loki ya indexa el TraceID nativo de OTLP como structured metadata. Copiarlo
+  # además a un atributo garantiza que la query LogQL del pivot funcione tanto
+  # por el campo nativo como por un filtro manual escrito a mano.
+  #
+  # Nota de sintaxis OTTL: los paths van en minúscula con guion bajo
+  # (trace_id, no TraceID) y `.string` es la conversión a hexadecimal.
+  transform/logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["trace_id"], trace_id.string)
+          - set(attributes["span_id"], span_id.string)
+
+exporters:
+  # ── Jaeger: backend principal de trazas (UI en :16686) ────────────────────
+  # Jaeger 1.58 recibe OTLP de forma nativa; el exporter jaeger clásico quedó
+  # obsoleto y fue eliminado del Collector.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # ── Tempo: segundo backend de trazas, integrado con Grafana ───────────────
+  # Permite comparar ambos backends y habilita el salto traza↔log desde Grafana.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # ── Prometheus: expone las métricas para scraping en :8889 ────────────────
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    send_timestamps: true
+    metric_expiration: 5m
+    # Convierte los resource attributes (service.name, deployment.environment)
+    # en labels de Prometheus. Sin esto no se puede filtrar por servicio en el
+    # dashboard ni correlacionar métricas con trazas.
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # ── Loki: backend de logs vía endpoint OTLP nativo (Loki 3.x) ─────────────
+  # Loki convierte service.name en la label service_name y el TraceID en
+  # structured metadata, que es justo lo que consume el pivot de Grafana.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  # ── debug: salida por stdout del Collector para diagnóstico ───────────────
+  # verbosity basic = solo conteos. Con 'detailed' el propio log del Collector
+  # se vuelve el cuello de botella durante el benchmark.
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 500
+
+service:
+  extensions: [health_check, pprof, zpages]
+
+  pipelines:
+    # ── TRAZAS ────────────────────────────────────────────────────────────────
+    traces:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource
+        - filter/health
+        - batch
+      exporters: [otlp/jaeger, otlp/tempo, debug]
+
+    # ── MÉTRICAS de las aplicaciones ──────────────────────────────────────────
+    metrics:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource
+        - attributes/metrics
+        - batch
+      exporters: [prometheus, debug]
+
+    # ── MÉTRICAS de infraestructura (CPU/memoria por contenedor) ──────────────
+    # Pipeline separado: estas métricas no necesitan los processors de
+    # cardinalidad de las aplicaciones y conviene aislarlas del camino crítico.
+    metrics/infra:
+      receivers: [docker_stats]
+      processors:
+        - memory_limiter
+        - resource
+        - batch
+      exporters: [prometheus]
+
+    # ── LOGS ──────────────────────────────────────────────────────────────────
+    logs:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource
+        - transform/logs
+        - batch
+      exporters: [otlphttp/loki, debug]
+
+  telemetry:
+    logs:
+      level: info
+      encoding: json
+    metrics:
+      level: detailed
+      address: 0.0.0.0:8888

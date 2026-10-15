@@ -1,0 +1,160 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Grafana — datasources y CORRELACIÓN CROSS-SIGNAL
+#
+# Este archivo es el que materializa el requisito de correlación del laboratorio.
+# No basta con emitir las tres señales: hay que poder NAVEGAR entre ellas.
+# El trace_id es el pivote que cierra el ciclo completo:
+#
+#            ┌──────────────────────────────────────────────┐
+#            │                                              │
+#            ▼                                              │
+#     ┌──────────────┐  trace_id   ┌──────────────┐        │
+#     │     LOGS     │────────────▶│    TRAZAS    │        │
+#     │    (Loki)    │◀────────────│ (Jaeger/Tempo)│       │
+#     └──────────────┘  service +  └──────┬───────┘        │
+#            ▲          time range        │ span metrics   │
+#            │                            ▼                │
+#            │                     ┌──────────────┐        │
+#            └─────────────────────│   MÉTRICAS   │────────┘
+#                    exemplar      │ (Prometheus) │
+#                                  └──────────────┘
+#
+#   Logs    → Trazas : derivedFields extrae el trace_id de la línea de log
+#   Trazas  → Logs   : tracesToLogsV2 filtra Loki por ese mismo trace_id
+#   Trazas  → Métricas: tracesToMetrics consulta los SLIs del servicio
+#   Métricas→ Trazas : exemplars enlazan un punto del histograma con su traza
+# ════════════════════════════════════════════════════════════════════════════
+
+apiVersion: 1
+
+# Se eliminan primero para que una reprovisión no deje datasources huérfanos.
+deleteDatasources:
+  - name: Prometheus
+  - name: Jaeger
+  - name: Tempo
+  - name: Loki
+
+datasources:
+  # ── MÉTRICAS ──────────────────────────────────────────────────────────────
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: 10s
+      # MÉTRICAS → TRAZAS: al activar exemplars en un panel, Grafana muestra
+      # puntos enlazados a la traza concreta que produjo esa muestra de latencia.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+          urlDisplayLabel: "Ver traza en Tempo"
+
+  # ── TRAZAS (backend principal, UI de referencia del entregable) ───────────
+  - name: Jaeger
+    type: jaeger
+    uid: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: true
+    jsonData:
+      # TRAZAS → LOGS: desde cualquier span se salta a los logs de ese mismo
+      # trace_id. El filtro por servicio y la ventana temporal acotan la
+      # búsqueda para que Loki no escanee todo el periodo.
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-2m"
+        spanEndTimeShift: "2m"
+        filterByTraceID: false
+        filterBySpanID: false
+        customQuery: true
+        query: '{service_name="${__span.tags["service.name"]}"} | trace_id = "${__span.traceId}"'
+      # TRAZAS → MÉTRICAS: enlaza un span con los SLIs del servicio.
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
+        queries:
+          - name: "Tasa de requests del servicio"
+            query: 'sum(rate(http_requests_total{service="$${__span.tags["service.name"]}"}[5m]))'
+          - name: "Latencia p99 del servicio"
+            query: 'histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service="$${__span.tags["service.name"]}"}[5m])) by (le))'
+      nodeGraph:
+        enabled: true
+      traceQuery:
+        timeShiftEnabled: true
+        spanStartTimeShift: "-1h"
+        spanEndTimeShift: "1h"
+
+  # ── TRAZAS (backend nativo de Grafana, con métricas derivadas) ────────────
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: true
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-2m"
+        spanEndTimeShift: "2m"
+        filterByTraceID: false
+        customQuery: true
+        query: '{service_name="${__span.tags["service.name"]}"} | trace_id = "${__span.traceId}"'
+      tracesToMetrics:
+        datasourceUid: prometheus
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
+        queries:
+          - name: "Tasa de requests del servicio"
+            query: 'sum(rate(http_requests_total{service="$${__span.tags["service.name"]}"}[5m]))'
+      # Mapa de servicios generado por metrics_generator de Tempo: visualiza la
+      # dependencia service-a → service-b a partir de las propias trazas.
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: loki
+      search:
+        hide: false
+
+  # ── LOGS ──────────────────────────────────────────────────────────────────
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true
+    jsonData:
+      maxLines: 2000
+      # LOGS → TRAZAS: convierte el trace_id de cada línea en un enlace directo
+      # a la traza. Es el salto que exige el entregable "correlacionar en
+      # Grafana Explorer usando trace_id como pivot".
+      derivedFields:
+        # 1) El trace_id llega por OTLP como structured metadata de Loki.
+        - name: TraceID
+          datasourceUid: jaeger
+          matcherType: label
+          matcherRegex: trace_id
+          url: "${__value.raw}"
+          urlDisplayLabel: "Ver traza en Jaeger"
+
+        - name: TraceID-Tempo
+          datasourceUid: tempo
+          matcherType: label
+          matcherRegex: trace_id
+          url: "${__value.raw}"
+          urlDisplayLabel: "Ver traza en Tempo"
+
+        # 2) Respaldo por expresión regular sobre el cuerpo del log, para los
+        #    logs en JSON plano donde el trace_id va dentro del texto.
+        - name: TraceID-regex
+          datasourceUid: jaeger
+          matcherType: regex
+          matcherRegex: '"trace_id"\s*:\s*"([a-f0-9]{32})"'
+          url: "${__value.raw}"
+          urlDisplayLabel: "Ver traza (desde JSON)"

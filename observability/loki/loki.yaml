@@ -1,0 +1,58 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Loki — backend de logs
+#
+# Configuración monolítica de un solo nodo, suficiente para el laboratorio.
+# Lo relevante para la correlación cross-signal es allow_structured_metadata:
+# es lo que permite a Loki almacenar el trace_id que llega por OTLP como
+# metadato consultable, en vez de perderlo dentro del texto del log.
+# ════════════════════════════════════════════════════════════════════════════
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory:  /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    # tsdb + schema v13 son requisito para structured metadata (y por tanto
+    # para que el trace_id de OTLP sea consultable).
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  allow_structured_metadata: true
+  volume_enabled: true
+  # El benchmark genera ráfagas altas de logs; los límites por defecto
+  # provocarían descartes que se confundirían con pérdida de telemetría.
+  ingestion_rate_mb: 32
+  ingestion_burst_size_mb: 64
+  max_streams_per_user: 0
+  reject_old_samples: false
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+
+analytics:
+  reporting_enabled: false

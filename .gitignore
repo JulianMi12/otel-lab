@@ -1,0 +1,28 @@
+# Datos de runtime de los backends de telemetría
+.data/
+benchmark/results/
+*.log
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+
+# Credenciales — nunca deben entrar al repositorio
+*.json.key
+sa-key*.json
+credentials.json
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db

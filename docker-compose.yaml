@@ -1,0 +1,368 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Stack de observabilidad end-to-end con OpenTelemetry — entorno local
+#
+#   Levantar:   docker compose up -d --build
+#   Estado:     docker compose ps
+#   Línea base: docker compose --profile baseline up -d
+#   Carga:      docker compose --profile load run --rm k6 run /scripts/load.js
+#   Apagar:     docker compose down -v
+#
+# Accesos:
+#   service-a            http://localhost:8000/docs
+#   service-b            http://localhost:8001/docs
+#   Jaeger UI            http://localhost:16686
+#   Grafana              http://localhost:3000   (admin / admin)
+#   Prometheus           http://localhost:9090
+#   Loki                 http://localhost:3100
+#   Tempo                http://localhost:3200
+#   Collector zPages     http://localhost:55679/debug/servicez
+# ════════════════════════════════════════════════════════════════════════════
+
+name: otel-lab
+
+networks:
+  otel-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  tempo-data:
+
+# Límites idénticos para los servicios instrumentados y los de línea base.
+# Sin esta igualdad el benchmark de overhead no sería comparable: cualquier
+# diferencia de CPU disponible se confundiría con el costo de OTel.
+x-service-limits: &service-limits
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+      reservations:
+        cpus: "0.25"
+        memory: 128M
+
+services:
+  # ══════════════════════════════════════════════════════════════════════════
+  # CAPA DE DATOS
+  # ══════════════════════════════════════════════════════════════════════════
+  postgres:
+    image: postgres:16-alpine
+    container_name: otel-postgres
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: appdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks: [otel-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # BACKENDS DE TELEMETRÍA
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # ── Trazas: Jaeger ────────────────────────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    container_name: otel-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      # Badger persiste las trazas en disco: sobreviven a un reinicio, lo que
+      # evita perder las evidencias capturadas durante el laboratorio.
+      SPAN_STORAGE_TYPE: badger
+      BADGER_EPHEMERAL: "false"
+      BADGER_DIRECTORY_VALUE: /badger/data
+      BADGER_DIRECTORY_KEY: /badger/key
+    user: "0"
+    volumes:
+      - ./.data/jaeger:/badger
+    ports:
+      - "16686:16686"   # UI
+      - "14269:14269"   # métricas internas / health
+    networks: [otel-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:14269/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # ── Trazas: Tempo ─────────────────────────────────────────────────────────
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: otel-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    user: "0"
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
+    networks: [otel-net]
+
+  # ── Logs: Loki ────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.2.1
+    container_name: otel-loki
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    user: "0"
+    volumes:
+      - ./observability/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks: [otel-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # ── Métricas: Prometheus ──────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: otel-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      # Receptor de remote-write: lo usa metrics_generator de Tempo para
+      # publicar las métricas RED derivadas de las trazas.
+      - "--web.enable-remote-write-receiver"
+      # Exemplars: el enlace de un punto de métrica a su traza concreta.
+      - "--enable-feature=exemplar-storage"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./observability/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [otel-net]
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # OTEL COLLECTOR — punto único de entrada de las tres señales
+  # ══════════════════════════════════════════════════════════════════════════
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.103.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    # root: necesario para leer el socket de Docker del receiver docker_stats,
+    # que es la fuente de CPU y memoria del análisis de overhead.
+    user: "0:0"
+    volumes:
+      - ./otel-collector/collector-local.yaml:/etc/otel/collector-config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      ENVIRONMENT: development
+      CLOUD_REGION: local
+    ports:
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+      - "8888:8888"     # métricas internas del Collector
+      - "8889:8889"     # métricas de las apps para scraping
+      - "13133:13133"   # health check
+      - "55679:55679"   # zPages
+    networks: [otel-net]
+    depends_on:
+      jaeger:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    # La imagen del Collector es distroless: no incluye shell, wget ni curl,
+    # así que no se puede sondear el endpoint de salud desde dentro. Se ejecuta
+    # el propio binario, que confirma que el contenedor está vivo y responde.
+    # El endpoint real (http://localhost:13133/) sigue disponible desde el host
+    # y es el que consulta scripts/verify-pipeline.sh.
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # VISUALIZACIÓN
+  # ══════════════════════════════════════════════════════════════════════════
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: otel-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: light
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # traceToMetrics y traceqlEditor habilitan los saltos entre señales
+      # configurados en datasources.yaml.
+      GF_FEATURE_TOGGLES_ENABLE: traceqlEditor traceToMetrics lokiStructuredMetadata
+      GF_LOG_LEVEL: warn
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks: [otel-net]
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
+      - tempo
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # APLICACIÓN — instrumentada con OTel
+  # ══════════════════════════════════════════════════════════════════════════
+  service-a:
+    build:
+      context: ./services
+      dockerfile: service-a/Dockerfile
+    image: otel-lab/service-a:1.0.0
+    container_name: service-a
+    environment:
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      SERVICE_B_URL: http://service-b:8001
+      DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
+      PROMETHEUS_PORT: "9464"
+      ENVIRONMENT: development
+      CLOUD_PROVIDER: local
+      APP_VERSION: 1.0.0
+    ports:
+      - "8000:8000"
+      - "9464:9464"
+    networks: [otel-net]
+    <<: *service-limits
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  service-b:
+    build:
+      context: ./services
+      dockerfile: service-b/Dockerfile
+    image: otel-lab/service-b:1.0.0
+    container_name: service-b
+    environment:
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
+      PROMETHEUS_PORT: "9464"
+      ENVIRONMENT: development
+      CLOUD_PROVIDER: local
+      APP_VERSION: 1.0.0
+      LATENCY_JITTER_MS: "25"
+    ports:
+      - "8001:8001"
+      - "9465:9464"
+    networks: [otel-net]
+    <<: *service-limits
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # LÍNEA BASE DEL BENCHMARK — mismo código, OTEL_ENABLED=false
+  #
+  # Misma imagen, mismos límites de recursos y misma base de datos. La única
+  # diferencia es que el SDK de OpenTelemetry nunca se carga. Comparar estos
+  # contenedores contra los de arriba aísla el costo real de la instrumentación.
+  #
+  #   docker compose --profile baseline up -d
+  # ══════════════════════════════════════════════════════════════════════════
+  service-a-baseline:
+    profiles: [baseline]
+    build:
+      context: ./services
+      dockerfile: service-a/Dockerfile
+    image: otel-lab/service-a:1.0.0
+    container_name: service-a-baseline
+    environment:
+      OTEL_ENABLED: "false"
+      SERVICE_B_URL: http://service-b-baseline:8001
+      DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
+      ENVIRONMENT: benchmark-baseline
+      CLOUD_PROVIDER: local
+      APP_VERSION: 1.0.0
+    ports:
+      - "8010:8000"
+    networks: [otel-net]
+    <<: *service-limits
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  service-b-baseline:
+    profiles: [baseline]
+    build:
+      context: ./services
+      dockerfile: service-b/Dockerfile
+    image: otel-lab/service-b:1.0.0
+    container_name: service-b-baseline
+    environment:
+      OTEL_ENABLED: "false"
+      DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
+      ENVIRONMENT: benchmark-baseline
+      CLOUD_PROVIDER: local
+      APP_VERSION: 1.0.0
+      LATENCY_JITTER_MS: "25"
+    ports:
+      - "8011:8001"
+    networks: [otel-net]
+    <<: *service-limits
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # GENERADOR DE CARGA
+  #   docker compose --profile load run --rm k6 run /scripts/load.js
+  # ══════════════════════════════════════════════════════════════════════════
+  k6:
+    profiles: [load]
+    image: grafana/k6:0.52.0
+    container_name: otel-k6
+    volumes:
+      - ./benchmark:/scripts
+      - ./benchmark/results:/results
+    networks: [otel-net]
+    environment:
+      K6_OUT: json=/results/raw.json
