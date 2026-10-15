@@ -6,6 +6,34 @@ Pipeline completo que captura las **tres señales** de observabilidad (métricas
 
 ---
 
+## Origen del proyecto
+
+Este repositorio parte del laboratorio base publicado en
+[mafeopa/oTelLabs](https://github.com/mafeopa/oTelLabs), del que se conservan la
+arquitectura y las decisiones de diseño principales:
+
+- El flujo `service-a → service-b` con PostgreSQL en ambos extremos
+- FastAPI instrumentado con el SDK de OpenTelemetry
+- El OTel Collector como punto único de entrada de las señales
+- El stack de backends Jaeger · Tempo · Prometheus · Grafana
+- La nomenclatura de los custom spans de negocio y los 4 SLIs del dashboard
+
+La implementación se reescribió para que el pipeline funcione de extremo a
+extremo y para cubrir los puntos que faltaban. Los cambios principales:
+
+| Área | Qué se corrigió o añadió |
+|---|---|
+| Arranque | Ruta de credenciales de GCP embebida en el compose y exporter `googlecloud` en el pipeline de logs: impedían levantar el stack sin una cuenta de Google |
+| Logs | Se añadió **Loki** y la emisión de logs por OTLP. El datasource de Jaeger ya apuntaba a un `loki` que no existía, así que la correlación traza↔log no podía funcionar |
+| Métricas | `PrometheusMetricReader` estaba importado pero no se usaba, y los puertos de scraping no coincidían con los publicados en el compose |
+| Histogramas | Fronteras explícitas de bucket: los valores por defecto asumen milisegundos y volvían inservible el p99 medido en segundos |
+| Telemetría | `services/common/telemetry.py` centraliza los tres pilares y permite desactivarlos con `OTEL_ENABLED`, que es lo que hace posible el benchmark comparativo |
+| Benchmark | Línea base real sin instrumentación, ventanas temporales por escenario y medición de recursos desde el host |
+| IaC | Terraform para GCP Cloud Run y AWS ECS Fargate con el Collector como sidecar |
+| Verificación | `verify-pipeline.sh` comprueba la correlación consultando las APIs de los backends, en lugar de inspeccionar la interfaz a mano |
+
+---
+
 ## Tabla de contenidos
 
 1. [Arquitectura](#arquitectura)
