@@ -98,6 +98,10 @@ orders_processed_total = meter.create_counter(
 # gestionada, que es el unico recurso del stack con costo por hora continuo.
 almacen = None
 
+# Tokens de identidad cacheados por audiencia, para no pedir uno nuevo al
+# metadata server en cada peticion saliente.
+_token_cache = {}
+
 
 # -----------------------------------------------------------------------------
 # Aplicacion
@@ -280,6 +284,44 @@ async def get_order(order_id: str, request: Request):
         active_requests.add(-1, base_labels)
 
 
+async def _token_identidad(audiencia):
+    """
+    Obtiene un token OIDC para invocar un servicio de Cloud Run protegido.
+
+    En Cloud Run los servicios no publicos exigen un token de identidad firmado
+    por Google cuya audiencia sea la URL del servicio destino. El token se pide
+    al metadata server, que solo es accesible desde dentro de la instancia.
+
+    Fuera de GCP no existe ese servidor: la funcion devuelve None y la llamada
+    sale sin cabecera de autorizacion, que es justo lo que necesita el entorno
+    local, donde service-b no esta protegido.
+    """
+    global _token_cache
+
+    ahora = time.time()
+    entrada = _token_cache.get(audiencia)
+    if entrada and entrada["expira"] > ahora:
+        return entrada["token"]
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as cliente:
+            resp = await cliente.get(
+                "http://metadata.google.internal/computeMetadata/v1/instance/"
+                "service-accounts/default/identity",
+                params={"audience": audiencia},
+                headers={"Metadata-Flavor": "Google"},
+            )
+            resp.raise_for_status()
+            token = resp.text.strip()
+    except Exception:
+        # Sin metadata server no estamos en GCP: es el caso local y no es error.
+        return None
+
+    # Los tokens duran una hora; se renuevan con cinco minutos de margen.
+    _token_cache[audiencia] = {"token": token, "expira": ahora + 3300}
+    return token
+
+
 async def _call_service_b(product):
     """
     Llama a service-b. HTTPXClientInstrumentor inyecta automaticamente el header
@@ -296,8 +338,17 @@ async def _call_service_b(product):
     ) as span:
         service_b_calls_total.add(1, {"result": "attempt"})
         try:
+            # En Cloud Run service-b esta protegido por IAM y exige un token
+            # de identidad; en local no hay metadata server y se envia sin el.
+            cabeceras = {}
+            token = await _token_identidad(SERVICE_B_URL)
+            if token:
+                cabeceras["Authorization"] = "Bearer " + token
+
             async with httpx.AsyncClient(timeout=SERVICE_B_TIMEOUT) as client:
-                resp = await client.get(SERVICE_B_URL + "/inventory/" + product)
+                resp = await client.get(
+                    SERVICE_B_URL + "/inventory/" + product, headers=cabeceras
+                )
                 resp.raise_for_status()
                 inventory = resp.json()
 

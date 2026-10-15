@@ -99,10 +99,10 @@ resource "google_service_account" "runtime" {
 # No se otorga ningun rol de lectura ni administrativo.
 resource "google_project_iam_member" "runtime_roles" {
   for_each = toset([
-    "roles/cloudtrace.agent",       # escribir trazas en Cloud Trace
-    "roles/logging.logWriter",      # escribir logs en Cloud Logging
+    "roles/cloudtrace.agent",        # escribir trazas en Cloud Trace
+    "roles/logging.logWriter",       # escribir logs en Cloud Logging
     "roles/monitoring.metricWriter", # escribir metricas en Cloud Monitoring
-    "roles/cloudsql.client",        # conectarse a Cloud SQL
+    "roles/cloudsql.client",         # conectarse a Cloud SQL
   ])
 
   project = var.project_id
@@ -220,9 +220,14 @@ resource "google_cloud_run_v2_service" "service_b" {
   location = var.region
   labels   = var.labels
 
-  # INGRESS_INTERNAL: service-b solo acepta trafico desde dentro del proyecto.
-  # Es el downstream, no tiene por que ser alcanzable desde internet.
-  ingress = "INGRESS_TRAFFIC_INTERNAL_ONLY"
+  # El trafico saliente de Cloud Run sale a internet salvo que se configure un
+  # conector VPC, de modo que INGRESS_TRAFFIC_INTERNAL_ONLY haria que las
+  # llamadas de service-a se vieran como externas y recibieran un 404.
+  #
+  # La proteccion no se pierde: service-b NO tiene binding para allUsers, asi
+  # que solo la service account del laboratorio puede invocarlo y toda peticion
+  # debe traer un token OIDC valido. El control es de IAM, no de red.
+  ingress = "INGRESS_TRAFFIC_ALL"
 
   template {
     service_account = google_service_account.runtime.email
@@ -259,6 +264,10 @@ resource "google_cloud_run_v2_service" "service_b" {
       name  = "app"
       image = "${local.registry}/service-b:${var.app_version}"
 
+      # El sidecar debe estar aceptando OTLP antes de que la app empiece a
+      # exportar; si no, los primeros spans se pierden por conexion rechazada.
+      depends_on = ["otel-collector"]
+
       ports {
         container_port = 8001
       }
@@ -268,6 +277,14 @@ resource "google_cloud_run_v2_service" "service_b" {
           cpu    = var.service_cpu
           memory = var.service_memory
         }
+
+        # CPU siempre asignada, no solo durante las peticiones.
+        #
+        # Por defecto Cloud Run retira la CPU en cuanto una peticion termina.
+        # El sidecar del Collector es un proceso de fondo que exporta por
+        # lotes, asi que sin CPU entre peticiones nunca llega a enviar nada y
+        # la telemetria se pierde al apagarse la instancia.
+        cpu_idle = false
       }
 
       dynamic "env" {
@@ -279,7 +296,7 @@ resource "google_cloud_run_v2_service" "service_b" {
       }
 
       env {
-        name = "OTEL_ENABLED"
+        name  = "OTEL_ENABLED"
         value = "true"
       }
 
@@ -289,9 +306,18 @@ resource "google_cloud_run_v2_service" "service_b" {
         value = "http://localhost:4317"
       }
 
+      # Sin Cloud SQL la variable queda VACIA a proposito: el servicio detecta
+      # la ausencia y usa el almacen en memoria de inmediato, sin gastar el
+      # ciclo de reintentos de conexion contra un host inexistente, que podria
+      # agotar el tiempo de arranque de Cloud Run.
       env {
         name  = "DATABASE_URL"
-        value = var.enable_cloud_sql ? "postgresql://${var.db_user}:${var.db_password}@/${var.db_name}?host=/cloudsql/${google_sql_database_instance.postgres[0].connection_name}" : "postgresql://app:secret@localhost:5432/appdb"
+        value = var.enable_cloud_sql ? "postgresql://${var.db_user}:${var.db_password}@/${var.db_name}?host=/cloudsql/${google_sql_database_instance.postgres[0].connection_name}" : ""
+      }
+
+      env {
+        name  = "DATASTORE"
+        value = var.enable_cloud_sql ? "postgres" : "memoria"
       }
 
       dynamic "volume_mounts" {
@@ -324,6 +350,8 @@ resource "google_cloud_run_v2_service" "service_b" {
           cpu    = "1"
           memory = var.collector_memory
         }
+
+        cpu_idle = false
       }
 
       env {
@@ -339,6 +367,18 @@ resource "google_cloud_run_v2_service" "service_b" {
       volume_mounts {
         name       = "collector-config"
         mount_path = "/etc/otel"
+      }
+
+      # Hace que depends_on sea efectivo: el contenedor no cuenta como listo
+      # hasta que el receptor OTLP acepta conexiones en el puerto 4317.
+      startup_probe {
+        tcp_socket {
+          port = 4317
+        }
+        initial_delay_seconds = 3
+        period_seconds        = 3
+        failure_threshold     = 10
+        timeout_seconds       = 3
       }
     }
   }
@@ -393,6 +433,10 @@ resource "google_cloud_run_v2_service" "service_a" {
       name  = "app"
       image = "${local.registry}/service-a:${var.app_version}"
 
+      # El sidecar debe estar aceptando OTLP antes de que la app empiece a
+      # exportar; si no, los primeros spans se pierden por conexion rechazada.
+      depends_on = ["otel-collector"]
+
       ports {
         container_port = 8000
       }
@@ -402,6 +446,14 @@ resource "google_cloud_run_v2_service" "service_a" {
           cpu    = var.service_cpu
           memory = var.service_memory
         }
+
+        # CPU siempre asignada, no solo durante las peticiones.
+        #
+        # Por defecto Cloud Run retira la CPU en cuanto una peticion termina.
+        # El sidecar del Collector es un proceso de fondo que exporta por
+        # lotes, asi que sin CPU entre peticiones nunca llega a enviar nada y
+        # la telemetria se pierde al apagarse la instancia.
+        cpu_idle = false
       }
 
       dynamic "env" {
@@ -429,9 +481,18 @@ resource "google_cloud_run_v2_service" "service_a" {
         value = google_cloud_run_v2_service.service_b.uri
       }
 
+      # Sin Cloud SQL la variable queda VACIA a proposito: el servicio detecta
+      # la ausencia y usa el almacen en memoria de inmediato, sin gastar el
+      # ciclo de reintentos de conexion contra un host inexistente, que podria
+      # agotar el tiempo de arranque de Cloud Run.
       env {
         name  = "DATABASE_URL"
-        value = var.enable_cloud_sql ? "postgresql://${var.db_user}:${var.db_password}@/${var.db_name}?host=/cloudsql/${google_sql_database_instance.postgres[0].connection_name}" : "postgresql://app:secret@localhost:5432/appdb"
+        value = var.enable_cloud_sql ? "postgresql://${var.db_user}:${var.db_password}@/${var.db_name}?host=/cloudsql/${google_sql_database_instance.postgres[0].connection_name}" : ""
+      }
+
+      env {
+        name  = "DATASTORE"
+        value = var.enable_cloud_sql ? "postgres" : "memoria"
       }
 
       dynamic "volume_mounts" {
@@ -463,6 +524,8 @@ resource "google_cloud_run_v2_service" "service_a" {
           cpu    = "1"
           memory = var.collector_memory
         }
+
+        cpu_idle = false
       }
 
       env {
@@ -478,6 +541,18 @@ resource "google_cloud_run_v2_service" "service_a" {
       volume_mounts {
         name       = "collector-config"
         mount_path = "/etc/otel"
+      }
+
+      # Hace que depends_on sea efectivo: el contenedor no cuenta como listo
+      # hasta que el receptor OTLP acepta conexiones en el puerto 4317.
+      startup_probe {
+        tcp_socket {
+          port = 4317
+        }
+        initial_delay_seconds = 3
+        period_seconds        = 3
+        failure_threshold     = 10
+        timeout_seconds       = 3
       }
     }
   }

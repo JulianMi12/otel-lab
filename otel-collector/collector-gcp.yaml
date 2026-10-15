@@ -38,10 +38,13 @@ processors:
     limit_mib: 384
     spike_limit_mib: 96
 
+  # Lotes pequenos y vaciado rapido: en Cloud Run una instancia puede apagarse
+  # poco despues de la ultima peticion, y un timeout largo dejaria telemetria
+  # sin exportar. Se sacrifica eficiencia de red por no perder senales.
   batch:
-    timeout: 5s
-    send_batch_size: 512
-    send_batch_max_size: 1024
+    timeout: 1s
+    send_batch_size: 128
+    send_batch_max_size: 256
 
   # ── resourcedetection: metadatos nativos de Cloud Run ─────────────────────
   # El detector gcp consulta el metadata server y añade project_id, region,
@@ -79,22 +82,20 @@ processors:
           - set(severity_text, "INFO") where severity_number == 0
 
 exporters:
-  # ── Cloud Trace: backend de trazas gestionado ─────────────────────────────
+  # ── Cloud Trace y Cloud Logging ───────────────────────────────────────────
+  # Sin credenciales explícitas: usa las Application Default Credentials de la
+  # service account adjunta al servicio de Cloud Run.
+  #
+  # Nota: este exporter NO admite `retry_on_failure` ni `sending_queue` en su
+  # nivel raíz; declararlos hace que el Collector no arranque con el error
+  # "'' has invalid keys: retry_on_failure". El reintento y el encolado se
+  # gestionan internamente contra la API de Google Cloud.
   googlecloud:
     project: ${env:GCP_PROJECT_ID}
     log:
       default_log_name: otel-lab
     trace:
       endpoint: cloudtrace.googleapis.com:443
-    # Sin credenciales explícitas: usa las Application Default Credentials de
-    # la service account adjunta al servicio de Cloud Run.
-    retry_on_failure:
-      enabled: true
-      initial_interval: 5s
-      max_interval: 30s
-    sending_queue:
-      enabled: true
-      queue_size: 1000
 
   # ── Google Managed Prometheus: métricas gestionadas ───────────────────────
   # Se prefiere al exporter googlecloud para métricas porque conserva el modelo
@@ -104,7 +105,7 @@ exporters:
     project: ${env:GCP_PROJECT_ID}
 
   debug:
-    verbosity: basic
+    verbosity: normal
 
 service:
   extensions: [health_check]
@@ -113,11 +114,20 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resourcedetection, resource, filter/health, batch]
-      exporters: [googlecloud]
+      # debug acompana a googlecloud para dejar constancia en los logs de
+      # cuantos spans atraviesan el pipeline: si googlecloud fallara en
+      # silencio, el contraste entre ambos lo delata.
+      exporters: [googlecloud, debug]
 
+    # Sin `batch` a proposito. Managed Prometheus rechaza una peticion que
+    # contenga dos puntos de la misma serie temporal ("Duplicate TimeSeries
+    # encountered. Only one point can be written per TimeSeries per request"),
+    # y agrupar varios ciclos del PeriodicExportingMetricReader produce justo
+    # eso. El SDK ya exporta por lotes cada 15 s, asi que el batch del
+    # Collector no aporta nada aqui y si rompe el envio.
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, resourcedetection, resource, batch]
+      processors: [memory_limiter, resourcedetection, resource]
       exporters: [googlemanagedprometheus]
 
     logs:

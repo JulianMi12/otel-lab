@@ -47,7 +47,7 @@ output "consola_managed_prometheus" {
 
 output "comandos_publicacion" {
   description = "Secuencia para construir y publicar las imágenes antes del apply"
-  value = <<-EOT
+  value       = <<-EOT
 
     1. Autenticar Docker contra Artifact Registry:
        gcloud auth configure-docker ${var.region}-docker.pkg.dev

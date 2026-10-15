@@ -135,8 +135,8 @@ variable "labels" {
   description = "Etiquetas aplicadas a todos los recursos facturables"
   type        = map(string)
   default = {
-    proyecto  = "otel-lab"
-    curso     = "observabilidad"
+    proyecto   = "otel-lab"
+    curso      = "observabilidad"
     gestionado = "terraform"
   }
 }

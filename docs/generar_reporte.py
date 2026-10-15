@@ -23,23 +23,28 @@ RESULTADOS = os.path.join(RAIZ, "benchmark", "results")
 SALIDA_HTML = os.path.join(RAIZ, "docs", "reporte-tecnico.html")
 
 
-# El benchmark se ejecuta en dos regimenes de carga. Cada uno responde una
-# pregunta distinta y por eso se reportan ambos:
-#
-#   - Carga moderada: la CPU no esta topada, asi que el consumo adicional de
-#     OpenTelemetry es visible como tal. Mide el overhead PURO.
-#   - Saturacion: la CPU esta al limite, de modo que el costo de la telemetria
-#     no puede manifestarse como mas CPU y se paga en throughput y latencia.
-#     Mide el impacto en CAPACIDAD.
+# El benchmark se ejecuta en TRES regimenes de carga. Medir uno solo daria una
+# imagen enganosa, porque el overhead cambia de forma segun quede o no CPU
+# libre: con margen se paga en consumo, y sin margen se paga en capacidad.
 REGIMENES = [
+    {
+        "clave": "ligera",
+        "carpeta": "ligera-10vus",
+        "titulo": "Carga ligera (10 usuarios concurrentes)",
+        "descripcion": (
+            "La CPU conserva margen libre (64 % de uso en la linea base), por lo "
+            "que el consumo adicional del SDK es directamente observable. Es la "
+            "medicion del overhead en si mismo."
+        ),
+    },
     {
         "clave": "moderada",
         "carpeta": "moderada-25vus",
         "titulo": "Carga moderada (25 usuarios concurrentes)",
         "descripcion": (
-            "La CPU no esta saturada, por lo que el consumo adicional de "
-            "OpenTelemetry es directamente observable. Es la medicion del "
-            "overhead en si mismo."
+            "El sistema entra en la zona de agotamiento de CPU. El overhead "
+            "medido en consumo empieza a desaparecer y comienza a reflejarse "
+            "como perdida de capacidad."
         ),
     },
     {
@@ -47,10 +52,11 @@ REGIMENES = [
         "carpeta": "saturacion-75vus",
         "titulo": "Saturacion (75 usuarios concurrentes)",
         "descripcion": (
-            "Ambos escenarios agotan el limite de 1.0 CPU por contenedor. Al no "
-            "haber CPU libre, el costo de la telemetria no puede aparecer como "
-            "mas consumo: se traduce en menos peticiones atendidas y mas "
-            "latencia. Es la medicion del impacto en la capacidad del servicio."
+            "Ambos escenarios agotan la CPU disponible. Sin margen libre, el "
+            "costo de la telemetria ya no puede aparecer como mas consumo: se "
+            "traduce en menos peticiones atendidas. Es la medicion del impacto "
+            "en la capacidad del servicio, y corresponde al rango de 50-100 "
+            "usuarios concurrentes que pide el enunciado."
         ),
     },
 ]
@@ -654,27 +660,49 @@ pedirle al proceso instrumentado que se mida a si mismo:</p>
       demonio de Docker desde el host.</li>
 </ul>
 
-<h3>5.2 Dos regimenes de carga</h3>
+<h3>5.2 Tres regimenes de carga</h3>
 
-<p>La medicion se repitio bajo dos niveles de concurrencia porque responden a
-preguntas distintas y una sola de ellas daria una imagen incompleta:</p>
+<p>La medicion se repitio bajo tres niveles de concurrencia. Medir uno solo
+habria dado una imagen enganosa, porque <strong>el overhead no desaparece ni
+crece: cambia de forma</strong> segun quede o no CPU libre.</p>
 
-<ul>
-  <li><strong>Carga moderada (25 VUs).</strong> La CPU no esta topada, de modo
-      que el consumo adicional del SDK es directamente observable. Responde
-      <em>cuanto cuesta instrumentar</em>.</li>
-  <li><strong>Saturacion (75 VUs).</strong> Ambos escenarios agotan el limite de
-      1.0 CPU por contenedor. Al no quedar CPU libre, el costo de la telemetria
-      no puede manifestarse como mas consumo y se traduce en menos peticiones
-      atendidas. Responde <em>cuanta capacidad cuesta</em>.</li>
-</ul>
+<table>
+  <tr>
+    <th>Regimen</th><th>CPU en linea base</th>
+    <th>Overhead en CPU</th><th>Perdida de throughput</th><th>Memoria</th>
+  </tr>
+  <tr>
+    <td><strong>10 VUs</strong> &mdash; holgado</td><td>63.6 %</td>
+    <td><strong>+29.9 %</strong></td><td>&minus;5.7 %</td><td>+90.9 %</td>
+  </tr>
+  <tr>
+    <td><strong>25 VUs</strong> &mdash; apretado</td><td>112.1 %</td>
+    <td>+5.2 %</td><td>&minus;19.4 %</td><td>+89.4 %</td>
+  </tr>
+  <tr>
+    <td><strong>75 VUs</strong> &mdash; saturado</td><td>119.9 %</td>
+    <td>+2.4 %</td><td><strong>&minus;24.7 %</strong></td><td>+85.1 %</td>
+  </tr>
+</table>
+
+<p>La relacion entre las dos columnas centrales es <strong>inversa</strong>:
+conforme la CPU se agota, el overhead medido en consumo se desvanece y
+reaparece como perdida de capacidad. Es el mismo trabajo adicional
+manifestandose alli donde queda margen para que se note.</p>
 
 <div class="nota">
-  Reportar unicamente el escenario saturado habria sido enganoso: la CPU
-  aparece casi igual en ambos casos (~100 %) no porque la instrumentacion sea
-  gratuita, sino porque <strong>no hay mas CPU que consumir</strong>. El limite
-  del contenedor actua como techo y enmascara el costo real.
+  <strong>Por que importa esta distincion.</strong> Reportar unicamente el
+  escenario saturado habria llevado a la conclusion de que instrumentar cuesta
+  apenas un 2 % de CPU. Eso es falso: la CPU aparece casi igual con y sin OTel
+  no porque la telemetria sea gratuita, sino porque <strong>no hay mas CPU que
+  consumir</strong>. El limite del contenedor actua como techo y enmascara el
+  costo, que se cobra en el throughput.
 </div>
+
+<p>La memoria, en cambio, sube entre un 85 % y un 91 % en los tres regimenes,
+con independencia de la carga. Esa estabilidad confirma que se trata de un
+<strong>costo fijo</strong> del SDK &mdash;providers, exporters y buffers de
+los procesadores por lotes&mdash; y no de un consumo proporcional al trafico.</p>
 
 <h3>5.3 Resultados</h3>
 
