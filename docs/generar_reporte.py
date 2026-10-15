@@ -23,8 +23,42 @@ RESULTADOS = os.path.join(RAIZ, "benchmark", "results")
 SALIDA_HTML = os.path.join(RAIZ, "docs", "reporte-tecnico.html")
 
 
-def cargar(nombre):
-    ruta = os.path.join(RESULTADOS, nombre)
+# El benchmark se ejecuta en dos regimenes de carga. Cada uno responde una
+# pregunta distinta y por eso se reportan ambos:
+#
+#   - Carga moderada: la CPU no esta topada, asi que el consumo adicional de
+#     OpenTelemetry es visible como tal. Mide el overhead PURO.
+#   - Saturacion: la CPU esta al limite, de modo que el costo de la telemetria
+#     no puede manifestarse como mas CPU y se paga en throughput y latencia.
+#     Mide el impacto en CAPACIDAD.
+REGIMENES = [
+    {
+        "clave": "moderada",
+        "carpeta": "moderada-25vus",
+        "titulo": "Carga moderada (25 usuarios concurrentes)",
+        "descripcion": (
+            "La CPU no esta saturada, por lo que el consumo adicional de "
+            "OpenTelemetry es directamente observable. Es la medicion del "
+            "overhead en si mismo."
+        ),
+    },
+    {
+        "clave": "saturacion",
+        "carpeta": "saturacion-75vus",
+        "titulo": "Saturacion (75 usuarios concurrentes)",
+        "descripcion": (
+            "Ambos escenarios agotan el limite de 1.0 CPU por contenedor. Al no "
+            "haber CPU libre, el costo de la telemetria no puede aparecer como "
+            "mas consumo: se traduce en menos peticiones atendidas y mas "
+            "latencia. Es la medicion del impacto en la capacidad del servicio."
+        ),
+    },
+]
+
+
+def cargar(nombre, subcarpeta=None):
+    base = RESULTADOS if subcarpeta is None else os.path.join(RESULTADOS, subcarpeta)
+    ruta = os.path.join(base, nombre)
     if not os.path.exists(ruta):
         return None
     try:
@@ -33,6 +67,23 @@ def cargar(nombre):
     except Exception as exc:
         print("  [aviso] no se pudo leer " + nombre + ": " + str(exc))
         return None
+
+
+def cargar_regimenes():
+    """Devuelve los regimenes que tienen resultados disponibles."""
+    disponibles = []
+    for reg in REGIMENES:
+        overhead = cargar("overhead.json", reg["carpeta"])
+        base = cargar("k6-baseline.json", reg["carpeta"])
+        instr = cargar("k6-instrumented.json", reg["carpeta"])
+        if overhead and base and instr:
+            disponibles.append(
+                dict(reg, overhead=overhead, base=base, instr=instr)
+            )
+            print("  " + reg["carpeta"] + ": encontrado")
+        else:
+            print("  " + reg["carpeta"] + ": sin datos")
+    return disponibles
 
 
 def filas_tabla(overhead):
@@ -123,25 +174,49 @@ def bloque_correlacion(instr):
     )
 
 
+def bloque_resultados(regimenes):
+    """Una subseccion con su tabla por cada regimen de carga medido."""
+    if not regimenes:
+        return (
+            "<p class='sin-datos'>Benchmark no ejecutado. Correr "
+            "<code>bash scripts/run-benchmark.sh</code> y regenerar este "
+            "reporte.</p>"
+        )
+
+    partes = []
+    for reg in regimenes:
+        partes.append("<h3>5.3." + str(len(partes) + 1) + " " + reg["titulo"] + "</h3>")
+        partes.append("<p>" + reg["descripcion"] + "</p>")
+        partes.append(bloque_condiciones(reg["base"], reg["instr"]))
+        partes.append(
+            '<table><tr><th>Metrica</th><th>Sin OTel</th><th>Con OTel</th>'
+            "<th>Diferencia</th><th>Overhead</th></tr>"
+            + filas_tabla(reg["overhead"])
+            + "</table>"
+        )
+
+    return "\n".join(partes)
+
+
 def generar():
     print("Leyendo resultados del benchmark...")
-    overhead = cargar("overhead.json")
-    base = cargar("k6-baseline.json")
-    instr = cargar("k6-instrumented.json")
+    regimenes = cargar_regimenes()
 
-    if overhead:
-        print("  overhead.json encontrado")
-    else:
-        print("  [aviso] overhead.json no encontrado: el reporte se generara "
-              "con la seccion de benchmark vacia")
+    # El bloque de correlacion usa el regimen mas cargado disponible, que es el
+    # que acumula mas peticiones y por tanto mas evidencia de trace_id.
+    instr_principal = None
+    if regimenes:
+        instr_principal = max(
+            (r["instr"] for r in regimenes),
+            key=lambda d: d.get("requests_totales") or 0,
+        )
 
     fecha = datetime.now().strftime("%d/%m/%Y")
 
     html = PLANTILLA.format(
         fecha=fecha,
-        condiciones=bloque_condiciones(base, instr),
-        tabla_overhead=filas_tabla(overhead),
-        correlacion=bloque_correlacion(instr),
+        resultados=bloque_resultados(regimenes),
+        correlacion=bloque_correlacion(instr_principal),
     )
 
     os.makedirs(os.path.dirname(SALIDA_HTML), exist_ok=True)
@@ -579,19 +654,31 @@ pedirle al proceso instrumentado que se mida a si mismo:</p>
       demonio de Docker desde el host.</li>
 </ul>
 
-<h3>5.2 Condiciones de la prueba</h3>
+<h3>5.2 Dos regimenes de carga</h3>
 
-{condiciones}
+<p>La medicion se repitio bajo dos niveles de concurrencia porque responden a
+preguntas distintas y una sola de ellas daria una imagen incompleta:</p>
+
+<ul>
+  <li><strong>Carga moderada (25 VUs).</strong> La CPU no esta topada, de modo
+      que el consumo adicional del SDK es directamente observable. Responde
+      <em>cuanto cuesta instrumentar</em>.</li>
+  <li><strong>Saturacion (75 VUs).</strong> Ambos escenarios agotan el limite de
+      1.0 CPU por contenedor. Al no quedar CPU libre, el costo de la telemetria
+      no puede manifestarse como mas consumo y se traduce en menos peticiones
+      atendidas. Responde <em>cuanta capacidad cuesta</em>.</li>
+</ul>
+
+<div class="nota">
+  Reportar unicamente el escenario saturado habria sido enganoso: la CPU
+  aparece casi igual en ambos casos (~100 %) no porque la instrumentacion sea
+  gratuita, sino porque <strong>no hay mas CPU que consumir</strong>. El limite
+  del contenedor actua como techo y enmascara el costo real.
+</div>
 
 <h3>5.3 Resultados</h3>
 
-<table>
-  <tr>
-    <th>Metrica</th><th>Sin OTel</th><th>Con OTel</th>
-    <th>Diferencia</th><th>Overhead</th>
-  </tr>
-  {tabla_overhead}
-</table>
+{resultados}
 
 <h3>5.4 Interpretacion</h3>
 
@@ -607,13 +694,29 @@ la cola lenta revela el efecto de los vaciados periodicos del lote.</p>
 
 <p><strong>CPU.</strong> Es donde se concentra el gasto: serializar spans a
 Protobuf, agregar histogramas y formatear registros consume ciclos de forma
-proporcional al volumen de telemetria, no al numero de peticiones.</p>
+proporcional al volumen de telemetria, no al numero de peticiones. El efecto
+solo es legible en el regimen no saturado; bajo saturacion queda oculto tras el
+techo del contenedor.</p>
 
 <p><strong>Memoria.</strong> El SDK introduce un costo <em>base fijo</em>
 &mdash;providers, exporters y buffers de los procesadores por lotes&mdash; que se
 paga al arrancar y que luego crece poco con la carga. En servicios pequenos este
 costo fijo puede representar un porcentaje llamativo sin ser preocupante en
 terminos absolutos.</p>
+
+<p><strong>Throughput.</strong> Es la traduccion practica del overhead cuando el
+servicio ya opera al limite. Cada ciclo de CPU dedicado a producir telemetria es
+un ciclo que no atiende peticiones, de modo que la capacidad maxima baja aunque
+el consumo medido se mantenga igual.</p>
+
+<div class="nota">
+  <strong>Sobre el lenguaje de la aplicacion.</strong> Los servicios estan
+  escritos en Python, donde el bloqueo global del interprete impide que el hilo
+  de exportacion y el de atencion de peticiones progresen en paralelo dentro del
+  mismo proceso. El overhead relativo medido aqui es, por tanto, un limite
+  superior: una implementacion equivalente en Go o Java mostraria un costo
+  menor con la misma configuracion de OpenTelemetry.
+</div>
 
 <div class="destacado">
   <strong>Palancas para reducir el overhead en produccion.</strong>

@@ -220,10 +220,31 @@ separador "FASE 3 / 3 — ANÁLISIS COMPARATIVO"
 
 python benchmark/analyze_overhead.py --prometheus http://localhost:9090
 
+# ── Archivado por régimen de carga ──────────────────────────────────────────
+# Con ETIQUETA definida, los resultados se mueven a su propia subcarpeta. Es lo
+# que permite conservar varias corridas (carga moderada y saturación) y que el
+# generador del reporte las presente por separado en vez de pisarse entre sí.
+#
+#   ETIQUETA=moderada-25vus VUS=25 bash scripts/run-benchmark.sh
+if [[ -n "${ETIQUETA:-}" ]]; then
+  DESTINO="benchmark/results/${ETIQUETA}"
+  mkdir -p "$DESTINO"
+  for f in k6-baseline.json k6-instrumented.json overhead.json overhead.md ventanas.json; do
+    [[ -f "benchmark/results/$f" ]] && mv "benchmark/results/$f" "$DESTINO/"
+  done
+  verde "Resultados archivados en $DESTINO/"
+fi
+
 separador "BENCHMARK FINALIZADO"
 echo "Resultados en:"
-echo "  benchmark/results/k6-baseline.json"
-echo "  benchmark/results/k6-instrumented.json"
-echo "  benchmark/results/overhead.md     <- tabla para el reporte"
-echo "  benchmark/results/overhead.json"
+if [[ -n "${ETIQUETA:-}" ]]; then
+  echo "  benchmark/results/${ETIQUETA}/"
+else
+  echo "  benchmark/results/"
+fi
+echo "    k6-baseline.json      métricas de cliente, línea base"
+echo "    k6-instrumented.json  métricas de cliente, instrumentado"
+echo "    overhead.md           tabla comparativa"
+echo "    overhead.json         datos crudos para el reporte"
+echo "    ventanas.json         intervalo de carga de cada escenario"
 echo ""

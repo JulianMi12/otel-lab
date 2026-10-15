@@ -278,27 +278,38 @@ Con `OTEL_ENABLED=false`, `common/telemetry.py` devuelve implementaciones no-op 
 - **Latencia y throughput** → k6, desde el cliente.
 - **CPU y memoria** → receiver `docker_stats` del Collector, desde el host.
 
+### Dos regímenes de carga
+
+La medición se ejecuta en dos niveles de concurrencia porque responden a preguntas distintas:
+
+| Régimen | VUs | Qué mide |
+|---|---|---|
+| **Carga moderada** | 25 | La CPU no está topada, así que el consumo extra de OTel es directamente observable → **cuánto cuesta instrumentar** |
+| **Saturación** | 75 | Ambos escenarios agotan el límite de 1.0 CPU. El costo no puede aparecer como más CPU y se paga en throughput → **cuánta capacidad cuesta** |
+
+Reportar solo el escenario saturado sería engañoso: la CPU sale casi idéntica en ambos casos (~100 %) no porque la instrumentación salga gratis, sino porque **no queda CPU que consumir**. El límite del contenedor actúa como techo y enmascara el costo real.
+
 ### Ejecución
 
 ```bash
-bash scripts/run-benchmark.sh
+# Régimen de saturación (el que pide el enunciado: 50–100 VUs, 5 min)
+ETIQUETA=saturacion-75vus VUS=75 bash scripts/run-benchmark.sh
+
+# Régimen de carga moderada
+ETIQUETA=moderada-25vus VUS=25 bash scripts/run-benchmark.sh
 ```
 
-Por defecto: 75 usuarios concurrentes, rampa de 30 s y meseta de 5 minutos, en línea con el enunciado (50–100 VUs, 5 minutos). Parametrizable:
-
-```bash
-VUS=100 DURATION=5m bash scripts/run-benchmark.sh
-```
-
-El script levanta la línea base, la calienta, ejecuta la carga, apaga esos contenedores para liberar CPU, repite contra los instrumentados y finalmente ejecuta el análisis comparativo.
+El script levanta la línea base, la calienta, ejecuta la carga, apaga esos contenedores para liberar CPU, repite contra los instrumentados y ejecuta el análisis comparativo. `ETIQUETA` archiva los resultados en su propia subcarpeta para que las dos corridas no se pisen.
 
 ### Resultados
 
 ```
-benchmark/results/k6-baseline.json       métricas de cliente, línea base
-benchmark/results/k6-instrumented.json   métricas de cliente, instrumentado
-benchmark/results/overhead.md            tabla comparativa para el reporte
-benchmark/results/overhead.json          datos crudos
+benchmark/results/<etiqueta>/
+  k6-baseline.json       métricas de cliente, línea base
+  k6-instrumented.json   métricas de cliente, instrumentado
+  overhead.md            tabla comparativa
+  overhead.json          datos crudos que consume el reporte
+  ventanas.json          intervalo de carga de cada escenario
 ```
 
 El análisis puede re-ejecutarse sin repetir la carga:
@@ -306,6 +317,15 @@ El análisis puede re-ejecutarse sin repetir la carga:
 ```bash
 python benchmark/analyze_overhead.py --prometheus http://localhost:9090
 ```
+
+### Reporte técnico
+
+```bash
+python docs/generar_reporte.py    # inyecta los resultados reales en el HTML
+bash scripts/generar-pdf.sh       # convierte a PDF con Chrome headless
+```
+
+El reporte lee `overhead.json` de cada régimen disponible, de modo que las cifras del documento y las de la medición nunca se desincronizan.
 
 ---
 
