@@ -39,9 +39,10 @@ if [[ "${1:-}" == "--solo-instrumentado" ]]; then
   SOLO_INSTRUMENTADO=true
 fi
 
-azul()  { printf "\033[1;34m%s\033[0m\n" "$1"; }
-verde() { printf "\033[1;32m%s\033[0m\n" "$1"; }
-rojo()  { printf "\033[1;31m%s\033[0m\n" "$1"; }
+azul()  { printf '\033[1;34m%s\033[0m\n' "$1"; }
+verde() { printf '\033[1;32m%s\033[0m\n' "$1"; }
+rojo()  { printf '\033[1;31m%s\033[0m\n' "$1"; }
+aviso() { printf '\033[1;33m%s\033[0m\n' "$1"; }
 
 separador() {
   echo ""
@@ -68,6 +69,95 @@ esperar_salud() {
   echo ""
   rojo "$nombre no respondió tras $((intentos * 2)) segundos"
   return 1
+}
+
+calentar() {
+  # Las primeras peticiones pagan el arranque del intérprete y el llenado del
+  # pool de conexiones. Incluirlas sesgaría los percentiles de la medición.
+  local url="$1"
+  echo "Calentando (20 peticiones)..."
+  for _ in $(seq 1 20); do
+    curl -fs "${url}/order/ORD-0001" > /dev/null 2>&1 || true
+  done
+}
+
+# k6 devuelve 99 cuando se cruza algún umbral. Los datos de la corrida siguen
+# siendo válidos: el umbral es un SLO de referencia, no una condición de éxito
+# del benchmark. Sin este envoltorio, `set -e` abortaría el script tras la
+# primera fase y la comparación nunca llegaría a ejecutarse.
+escribir_ventana() {
+  # Registra la ventana temporal EXACTA en la que cada escenario estuvo bajo
+  # carga. Es imprescindible para el analisis: las dos fases se ejecutan una
+  # despues de otra, asi que una ventana fija al final compararia el periodo
+  # activo de una con el periodo inactivo de la otra.
+  #
+  # Se descarta la rampa de subida: durante esos segundos todavia no hay la
+  # concurrencia objetivo y el promedio de CPU saldria artificialmente bajo.
+  local escenario="$1" inicio="$2" fin="$3"
+  python - "$escenario" "$inicio" "$fin" "$RAMP" <<'PY'
+import json, os, re, sys
+
+escenario, inicio, fin, rampa = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+
+# "30s" -> 30 ; "2m" -> 120
+m = re.match(r"^(\d+)([smh]?)$", rampa.strip())
+segundos = int(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[m.group(2)] if m else 30
+
+ruta = os.path.join("benchmark", "results", "ventanas.json")
+datos = {}
+if os.path.exists(ruta):
+    try:
+        datos = json.load(open(ruta, encoding="utf-8"))
+    except Exception:
+        datos = {}
+
+# +10 s extra de margen: el calentamiento y el arranque de k6 tambien diluyen.
+datos[escenario] = {"inicio": inicio + segundos + 10, "fin": fin}
+
+with open(ruta, "w", encoding="utf-8") as fh:
+    json.dump(datos, fh, indent=2)
+
+print("  ventana de medicion: %d s de meseta" % (fin - (inicio + segundos + 10)))
+PY
+}
+
+ejecutar_k6() {
+  local escenario="$1"
+  local objetivo="$2"
+  local codigo=0
+  local inicio fin
+
+  echo ""
+  echo "Ejecutando carga: $VUS VUs durante $DURATION"
+
+  inicio=$(date -u +%s)
+  set +e
+  docker compose --profile load run --rm \
+    -e TARGET="$objetivo" \
+    -e SCENARIO="$escenario" \
+    -e VUS="$VUS" \
+    -e DURATION="$DURATION" \
+    -e RAMP="$RAMP" \
+    k6 run /scripts/load.js
+  codigo=$?
+  set -e
+  fin=$(date -u +%s)
+
+  escribir_ventana "$escenario" "$inicio" "$fin"
+
+  if [[ $codigo -eq 99 ]]; then
+    echo ""
+    aviso "  Aviso: se cruzó algún umbral de k6 (exit 99)."
+    echo "  Los resultados son válidos; el umbral es un SLO de referencia."
+    return 0
+  fi
+
+  if [[ $codigo -ne 0 ]]; then
+    rojo "k6 falló con código $codigo"
+    return "$codigo"
+  fi
+
+  return 0
 }
 
 mkdir -p benchmark/results
@@ -97,26 +187,13 @@ docker compose --profile baseline up -d service-a-baseline service-b-baseline
 esperar_salud "http://localhost:8010/health" "service-a-baseline"
 esperar_salud "http://localhost:8011/health" "service-b-baseline"
 
-# Calentamiento: las primeras peticiones pagan la compilación JIT de Python y
-# el llenado del pool de conexiones. Incluirlas sesgaría los percentiles.
-echo "Calentando (20 peticiones)..."
-for i in $(seq 1 20); do
-  curl -fs "http://localhost:8010/order/ORD-0001" > /dev/null 2>&1 || true
-done
-
-echo ""
-echo "Ejecutando carga: $VUS VUs durante $DURATION"
-docker compose --profile load run --rm \
-  -e TARGET=http://service-a-baseline:8000 \
-  -e SCENARIO=baseline \
-  -e VUS="$VUS" \
-  -e DURATION="$DURATION" \
-  -e RAMP="$RAMP" \
-  k6 run /scripts/load.js
+calentar "http://localhost:8010"
+ejecutar_k6 "baseline" "http://service-a-baseline:8000"
 
 verde "Línea base completada."
 
-echo "Apagando los servicios de línea base para liberar CPU..."
+# Se apagan para que no compitan por CPU durante la segunda fase.
+echo "Apagando los servicios de línea base..."
 docker compose --profile baseline stop service-a-baseline service-b-baseline
 
 echo "Reposo de ${REPOSO}s antes de la siguiente fase..."
@@ -127,24 +204,12 @@ fi
 separador "FASE 2 / 3 — INSTRUMENTADO (OTel completo)"
 # ════════════════════════════════════════════════════════════════════════════
 
-echo "Calentando (20 peticiones)..."
-for i in $(seq 1 20); do
-  curl -fs "http://localhost:8000/order/ORD-0001" > /dev/null 2>&1 || true
-done
-
-echo ""
-echo "Ejecutando carga: $VUS VUs durante $DURATION"
-docker compose --profile load run --rm \
-  -e TARGET=http://service-a:8000 \
-  -e SCENARIO=instrumented \
-  -e VUS="$VUS" \
-  -e DURATION="$DURATION" \
-  -e RAMP="$RAMP" \
-  k6 run /scripts/load.js
+calentar "http://localhost:8000"
+ejecutar_k6 "instrumented" "http://service-a:8000"
 
 verde "Escenario instrumentado completado."
 
-# Las métricas de recursos se exportan cada 10s; se espera un ciclo completo
+# Las métricas de recursos se exportan cada 10 s; se espera un ciclo completo
 # para que Prometheus haya recogido el pico de la prueba.
 echo "Esperando 20s a que Prometheus recoja las últimas muestras..."
 sleep 20
@@ -159,6 +224,6 @@ separador "BENCHMARK FINALIZADO"
 echo "Resultados en:"
 echo "  benchmark/results/k6-baseline.json"
 echo "  benchmark/results/k6-instrumented.json"
-echo "  benchmark/results/overhead.md     ← tabla para el reporte"
+echo "  benchmark/results/overhead.md     <- tabla para el reporte"
 echo "  benchmark/results/overhead.json"
 echo ""

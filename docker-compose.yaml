@@ -364,5 +364,6 @@ services:
       - ./benchmark:/scripts
       - ./benchmark/results:/results
     networks: [otel-net]
-    environment:
-      K6_OUT: json=/results/raw.json
+    # Sin K6_OUT: volcar cada muestra individual a JSON genera ~100 MB por
+    # corrida y la escritura compite con la propia prueba. El handleSummary de
+    # load.js ya produce el resumen agregado que consume analyze_overhead.py.

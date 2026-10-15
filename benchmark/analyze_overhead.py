@@ -43,10 +43,20 @@ CONTENEDORES = {
 # -----------------------------------------------------------------------------
 # Consulta a Prometheus
 # -----------------------------------------------------------------------------
-def consultar_prometheus(base_url, query, timeout=15):
-    """Ejecuta una query instantanea y devuelve la lista de resultados."""
-    url = base_url.rstrip("/") + "/api/v1/query?" + urllib.parse.urlencode(
-        {"query": query}
+
+def consultar_rango(base_url, query, inicio, fin, paso=10, timeout=30):
+    """
+    Ejecuta una query sobre un RANGO temporal concreto y devuelve las series
+    con todos sus puntos.
+
+    Es la consulta correcta para este analisis: los dos escenarios se ejecutan
+    uno despues de otro, por lo que cada uno debe evaluarse sobre su propia
+    ventana de actividad. Una query instantanea con una ventana fija al final
+    compararia el periodo activo de un escenario con el periodo inactivo del
+    otro, que fue exactamente el error que producia un overhead de CPU negativo.
+    """
+    url = base_url.rstrip("/") + "/api/v1/query_range?" + urllib.parse.urlencode(
+        {"query": query, "start": inicio, "end": fin, "step": paso}
     )
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
@@ -62,74 +72,97 @@ def consultar_prometheus(base_url, query, timeout=15):
     return payload.get("data", {}).get("result", [])
 
 
-def metrica_por_contenedor(base_url, promql_template, contenedores, ventana="5m"):
+def estadisticas_en_ventana(base_url, promql, contenedores, ventana):
     """
-    Evalua una plantilla PromQL por contenedor y devuelve {contenedor: valor}.
+    Devuelve {contenedor: {"avg": x, "max": y}} dentro de la ventana indicada.
 
-    Se usa max_over_time sobre la ventana de la prueba en vez del valor
-    instantaneo: el valor puntual dependeria del momento exacto del scrape.
+    Los puntos se agregan en Python en lugar de con avg_over_time para poder
+    informar cuantas muestras respaldan cada valor: con una ventana corta y un
+    intervalo de scraping de 10 s, un promedio calculado sobre dos muestras no
+    merece la misma confianza que uno calculado sobre treinta.
     """
-    valores = {}
+    salida = {}
+
     for nombre in contenedores:
-        query = promql_template.format(contenedor=nombre, ventana=ventana)
-        resultado = consultar_prometheus(base_url, query)
-        if resultado:
-            try:
-                valores[nombre] = float(resultado[0]["value"][1])
-            except (KeyError, IndexError, ValueError):
-                valores[nombre] = None
+        query = promql.format(contenedor=nombre)
+        series = consultar_rango(
+            base_url, query, ventana["inicio"], ventana["fin"]
+        )
+
+        puntos = []
+        for s in series:
+            for _, valor in s.get("values", []):
+                try:
+                    v = float(valor)
+                except (TypeError, ValueError):
+                    continue
+                # NaN no es comparable y contaminaria el promedio.
+                if v == v:
+                    puntos.append(v)
+
+        if puntos:
+            salida[nombre] = {
+                "avg": sum(puntos) / len(puntos),
+                "max": max(puntos),
+                "muestras": len(puntos),
+            }
         else:
-            valores[nombre] = None
-    return valores
+            salida[nombre] = {"avg": None, "max": None, "muestras": 0}
+
+    return salida
 
 
-def recolectar_recursos(base_url, ventana="10m"):
+def recolectar_recursos_por_ventana(base_url, ventanas):
     """
-    Obtiene CPU y memoria pico de cada contenedor durante la ventana indicada.
+    CPU y memoria de cada escenario dentro de SU ventana de carga.
 
-    Los nombres provienen del receiver docker_stats del Collector, ya
-    normalizados por el exporter de Prometheus (puntos a guiones bajos, mas el
-    sufijo de unidad que anade la convencion de OpenTelemetry):
-
-        container.cpu.utilization    -> container_cpu_utilization_ratio
-        container.memory.usage.total -> container_memory_usage_total_bytes
-
-    El valor de CPU ya viene expresado en PORCENTAJE (96.0 = 96 %), no como
-    fraccion entre 0 y 1, por lo que no se reescala.
-
-    Se usa max by (container_name) porque al recrear un contenedor aparece una
-    serie nueva con otro container_id: sin la agregacion se compararia contra
-    la serie antigua de un contenedor que ya no existe.
+    El Collector se mide aparte: en el escenario instrumentado parte del costo
+    de la telemetria se desplaza de los servicios al propio Collector, y
+    sumarlo a los servicios o ignorarlo por completo daria dos lecturas
+    distintas del mismo fenomeno. Se reporta por separado para que el costo
+    total sea explicito.
     """
     recursos = {}
 
     for escenario, contenedores in CONTENEDORES.items():
-        cpu = metrica_por_contenedor(
+        ventana = ventanas.get(escenario)
+        if not ventana:
+            print("  [aviso] sin ventana registrada para " + escenario,
+                  file=sys.stderr)
+            recursos[escenario] = {"cpu": {}, "memoria": {}, "collector": {}}
+            continue
+
+        duracion = ventana["fin"] - ventana["inicio"]
+        print("  " + escenario + ": ventana de " + str(duracion) + " s")
+
+        cpu = estadisticas_en_ventana(
             base_url,
-            'max(max_over_time(container_cpu_utilization_ratio'
-            '{{container_name="{contenedor}"}}[{ventana}]))',
+            'max(container_cpu_utilization_ratio'
+            '{{container_name="{contenedor}"}}) by (container_name)',
             contenedores,
             ventana,
         )
-        cpu_prom = metrica_por_contenedor(
+        memoria = estadisticas_en_ventana(
             base_url,
-            'max(avg_over_time(container_cpu_utilization_ratio'
-            '{{container_name="{contenedor}"}}[{ventana}]))',
+            'max(container_memory_usage_total_bytes'
+            '{{container_name="{contenedor}"}}) by (container_name)',
             contenedores,
             ventana,
         )
-        mem = metrica_por_contenedor(
+        # El Collector solo trabaja en el escenario instrumentado; en la linea
+        # base esta ocioso. Medirlo en ambos hace visible esa diferencia.
+        collector = estadisticas_en_ventana(
             base_url,
-            'max(max_over_time(container_memory_usage_total_bytes'
-            '{{container_name="{contenedor}"}}[{ventana}]))',
-            contenedores,
+            'max(container_cpu_utilization_ratio'
+            '{{container_name="{contenedor}"}}) by (container_name)',
+            ["otel-collector"],
             ventana,
         )
 
         recursos[escenario] = {
-            "cpu_pico_pct": cpu,
-            "cpu_promedio_pct": cpu_prom,
-            "memoria_pico_bytes": mem,
+            "cpu": cpu,
+            "memoria": memoria,
+            "collector": collector,
         }
 
     return recursos
@@ -139,11 +172,20 @@ def recolectar_recursos(base_url, ventana="10m"):
 # Lectura de los resultados de k6
 # -----------------------------------------------------------------------------
 def cargar_resultado_k6(escenario):
-    ruta = os.path.join(RESULTS_DIR, "k6-" + escenario + ".json")
+    return cargar_json("k6-" + escenario + ".json")
+
+
+def cargar_json(nombre_archivo):
+    ruta = os.path.join(RESULTS_DIR, nombre_archivo)
     if not os.path.exists(ruta):
         return None
-    with open(ruta, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with open(ruta, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception as exc:
+        print("  [aviso] no se pudo leer " + nombre_archivo + ": " + str(exc),
+              file=sys.stderr)
+        return None
 
 
 # -----------------------------------------------------------------------------
@@ -167,12 +209,6 @@ def fmt_delta(valor):
         return "n/d"
     signo = "+" if valor >= 0 else ""
     return signo + "{:.2f}".format(valor) + " %"
-
-
-def suma_segura(diccionario):
-    """Suma ignorando los None; devuelve None si no hay ningun valor."""
-    valores = [v for v in diccionario.values() if v is not None]
-    return sum(valores) if valores else None
 
 
 def construir_tabla(base, instr, recursos):
@@ -213,31 +249,62 @@ def construir_tabla(base, instr, recursos):
         }
     )
 
-    # ── CPU (medida por docker_stats via Collector) ──────────────────────────
+    # ── Recursos, medidos cada uno en SU ventana de carga ────────────────────
+    def agregar(escenario, grupo, estadistico):
+        """Suma el estadistico de los dos servicios del escenario."""
+        datos = recursos.get(escenario, {}).get(grupo, {})
+        valores = [
+            v[estadistico]
+            for v in datos.values()
+            if isinstance(v, dict) and v.get(estadistico) is not None
+        ]
+        return sum(valores) if valores else None
+
     # docker_stats ya reporta la utilizacion en porcentaje: no se reescala.
-    b_cpu = suma_segura(recursos["baseline"]["cpu_promedio_pct"])
-    i_cpu = suma_segura(recursos["instrumented"]["cpu_promedio_pct"])
+    for etiqueta, estadistico in [
+        ("CPU media de los servicios", "avg"),
+        ("CPU pico de los servicios", "max"),
+    ]:
+        b = agregar("baseline", "cpu", estadistico)
+        i = agregar("instrumented", "cpu", estadistico)
+        filas.append(
+            {
+                "metrica": etiqueta,
+                "unidad": "%",
+                "base": fmt(b, " %"),
+                "instrumentado": fmt(i, " %"),
+                "delta_abs": fmt(i - b, " pp")
+                if (b is not None and i is not None)
+                else "n/d",
+                "delta_pct": fmt_delta(delta_pct(b, i)),
+            }
+        )
+
+    # CPU del Collector: en la linea base esta ocioso, asi que su consumo
+    # durante el escenario instrumentado es costo atribuible a la telemetria.
+    b_col = agregar("baseline", "collector", "avg")
+    i_col = agregar("instrumented", "collector", "avg")
     filas.append(
         {
-            "metrica": "CPU promedio (ambos servicios)",
+            "metrica": "CPU del OTel Collector",
             "unidad": "%",
-            "base": fmt(b_cpu, " %"),
-            "instrumentado": fmt(i_cpu, " %"),
-            "delta_abs": fmt(i_cpu - b_cpu, " pp")
-            if (b_cpu is not None and i_cpu is not None)
+            "base": fmt(b_col, " %"),
+            "instrumentado": fmt(i_col, " %"),
+            "delta_abs": fmt(i_col - b_col, " pp")
+            if (b_col is not None and i_col is not None)
             else "n/d",
-            "delta_pct": fmt_delta(delta_pct(b_cpu, i_cpu)),
+            "delta_pct": fmt_delta(delta_pct(b_col, i_col)),
         }
     )
 
     # ── Memoria ──────────────────────────────────────────────────────────────
-    b_mem = suma_segura(recursos["baseline"]["memoria_pico_bytes"])
-    i_mem = suma_segura(recursos["instrumented"]["memoria_pico_bytes"])
+    b_mem = agregar("baseline", "memoria", "max")
+    i_mem = agregar("instrumented", "memoria", "max")
     b_mb = b_mem / (1024 * 1024) if b_mem else None
     i_mb = i_mem / (1024 * 1024) if i_mem else None
     filas.append(
         {
-            "metrica": "Memoria pico (ambos servicios)",
+            "metrica": "Memoria pico de los servicios",
             "unidad": "MiB",
             "base": fmt(b_mb, " MiB"),
             "instrumentado": fmt(i_mb, " MiB"),
@@ -385,8 +452,19 @@ def main():
         print("\nNo hay suficientes datos para comparar.", file=sys.stderr)
         return 1
 
+    ventanas = cargar_json("ventanas.json")
+    if not ventanas:
+        print(
+            "\n  [error] falta benchmark/results/ventanas.json.\n"
+            "  Lo genera run-benchmark.sh y contiene la ventana temporal de cada\n"
+            "  escenario. Sin el, las metricas de CPU y memoria no se pueden\n"
+            "  atribuir a la fase correcta.",
+            file=sys.stderr,
+        )
+        return 1
+
     print("Consultando metricas de recursos en " + args.prometheus)
-    recursos = recolectar_recursos(args.prometheus, args.ventana)
+    recursos = recolectar_recursos_por_ventana(args.prometheus, ventanas)
 
     filas = construir_tabla(base, instr, recursos)
 
