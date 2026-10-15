@@ -77,6 +77,9 @@ capturar() {
   local nombre="$1"
   local url="$2"
   local espera="${3:-12000}"
+  # Alto del viewport: el dashboard completo mide bastante más que una
+  # pantalla, y con el valor por defecto se cortan los paneles finales.
+  local alto="${4:-1050}"
 
   echo "  capturando: $nombre"
 
@@ -87,7 +90,7 @@ capturar() {
     --disable-gpu \
     --no-sandbox \
     --hide-scrollbars \
-    --window-size=1680,1050 \
+    --window-size=1680,"$alto" \
     --virtual-time-budget="$espera" \
     --screenshot="${BASE_ABS}/${DESTINO}/${nombre}.png" \
     "$url" > /dev/null 2>&1 || true
@@ -112,7 +115,7 @@ capturar "02-jaeger-busqueda-trazas" \
 
 # 3. Dashboard de Grafana. kiosk=1 oculta la navegación lateral.
 capturar "03-grafana-dashboard-slis" \
-  "http://localhost:3000/d/otel-lab-main/otel-lab?orgId=1&from=now-30m&to=now&kiosk=1" 28000
+  "http://localhost:3000/d/otel-lab-main/otel-lab?orgId=1&from=now-30m&to=now&kiosk=1" 30000 2300
 
 # 4. Explore de Loki filtrado por el trace_id: la correlación log -> traza.
 CONSULTA_LOKI=$(python -c "
