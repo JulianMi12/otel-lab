@@ -32,6 +32,30 @@ extremo y para cubrir los puntos que faltaban. Los cambios principales:
 | IaC | Terraform para GCP Cloud Run y AWS ECS Fargate con el Collector como sidecar |
 | Verificación | `verify-pipeline.sh` comprueba la correlación consultando las APIs de los backends, en lugar de inspeccionar la interfaz a mano |
 
+### Equivalencia de rutas con el repositorio base
+
+La estructura se reorganizó para que los microservicios compartan un módulo de
+instrumentación común en lugar de duplicarlo. Si un enunciado o una guía
+menciona una ruta del repositorio original, su equivalente aquí es:
+
+| Repositorio base | Aquí |
+|---|---|
+| `service-a/main.py` | `services/service-a/main.py` |
+| `service-b/main.py` | `services/service-b/main.py` |
+| `service-a/requirements.txt` | `services/requirements.txt` (compartido) |
+| `otel-collector/collector-config.yaml` | `otel-collector/collector-local.yaml` |
+| `grafana/` | `observability/grafana/` |
+| `prometheus/` | `observability/prometheus/` |
+| `tempo/` | `observability/tempo/` |
+| `benchmark/k6_benchmark.js` | `benchmark/load.js` |
+| `k8s/gcp/`, `k8s/aws/` | `terraform/gcp/`, `terraform/aws/` |
+| — | `services/common/telemetry.py`, `services/common/datastore.py` |
+
+El agrupamiento bajo `services/` es deliberado: **añadir un tercer
+microservicio** solo requiere importar `common/telemetry.py`, en lugar de
+copiar por tercera vez el bootstrap de los tres pilares. El contexto de build
+de Docker es `services/`, por eso cada servicio puede acceder a `common/`.
+
 ---
 
 ## Tabla de contenidos

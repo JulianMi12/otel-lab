@@ -25,11 +25,10 @@ import random
 import time
 
 import httpx
-import psycopg2
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from psycopg2.pool import ThreadedConnectionPool
 
+from common.datastore import crear_almacen
 from common.telemetry import (
     current_trace_id,
     instrument_fastapi,
@@ -92,60 +91,12 @@ orders_processed_total = meter.create_counter(
 )
 
 # -----------------------------------------------------------------------------
-# Pool de conexiones
+# Acceso a datos
 # -----------------------------------------------------------------------------
-# Un pool evita pagar el handshake TCP+auth de PostgreSQL en cada request. Sin
-# el, el costo de conexion dominaria la medicion y contaminaria el benchmark de
-# overhead atribuyendole a OTel una latencia que en realidad es de la DB.
-db_pool = None
-
-
-def init_db_pool(retries=10, delay=2.0):
-    """Crea el pool reintentando: PostgreSQL puede tardar en aceptar conexiones."""
-    global db_pool
-    for attempt in range(1, retries + 1):
-        try:
-            db_pool = ThreadedConnectionPool(minconn=2, maxconn=20, dsn=DB_DSN)
-            log.info("Pool de PostgreSQL inicializado", extra={"intento": attempt})
-            return
-        except Exception as exc:
-            log.warning(
-                "PostgreSQL no disponible, reintentando",
-                extra={"intento": attempt, "error": str(exc)},
-            )
-            time.sleep(delay)
-    raise RuntimeError("No se pudo conectar a PostgreSQL tras varios intentos")
-
-
-def query_order(order_id):
-    """
-    Consulta sincrona del pedido. Se ejecuta en un thread aparte para no
-    bloquear el event loop de asyncio.
-
-    psycopg2 esta auto-instrumentado: esta funcion genera un span hijo con el
-    SQL como atributo sin una sola linea de codigo de tracing aqui dentro.
-    """
-    conn = db_pool.getconn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, product, quantity, status, unit_price "
-                "FROM orders WHERE id = %s",
-                (order_id,),
-            )
-            return cur.fetchone()
-    finally:
-        db_pool.putconn(conn)
-
-
-def query_order_ids(limit=50):
-    conn = db_pool.getconn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM orders ORDER BY id LIMIT %s", (limit,))
-            return [row[0] for row in cur.fetchall()]
-    finally:
-        db_pool.putconn(conn)
+# El almacen se resuelve en el arranque: PostgreSQL si esta disponible, y en
+# memoria si no. Eso permite desplegar en Cloud Run sin una base de datos
+# gestionada, que es el unico recurso del stack con costo por hora continuo.
+almacen = None
 
 
 # -----------------------------------------------------------------------------
@@ -160,15 +111,19 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def on_startup():
-    init_db_pool()
-    log.info("service-a listo", extra={"service_b_url": SERVICE_B_URL})
+    global almacen
+    almacen = crear_almacen(log)
+    log.info(
+        "service-a listo",
+        extra={"service_b_url": SERVICE_B_URL, "almacen": almacen.tipo},
+    )
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
     # Flush explicito: sin esto se pierden los spans y logs aun en el batch.
-    if db_pool:
-        db_pool.closeall()
+    if almacen:
+        almacen.cerrar()
     tel.shutdown()
 
 
@@ -187,6 +142,7 @@ async def root():
     return {
         "service": SERVICE_NAME,
         "otel_enabled": tel.enabled,
+        "almacen": almacen.tipo if almacen else "no inicializado",
         "downstream": SERVICE_B_URL,
         "endpoints": ["/order/{id}", "/orders", "/fail", "/health", "/metrics"],
     }
@@ -195,7 +151,7 @@ async def root():
 @app.get("/orders")
 async def list_orders():
     """Lista los IDs disponibles - util para alimentar el generador de carga."""
-    ids = await asyncio.to_thread(query_order_ids)
+    ids = await asyncio.to_thread(almacen.listar_pedidos)
     return {"order_ids": ids, "count": len(ids)}
 
 
@@ -227,7 +183,7 @@ async def get_order(order_id: str, request: Request):
             with tracer.start_as_current_span(
                 "fetch.order.db",
                 attributes={
-                    "db.system": "postgresql",
+                    "db.system": almacen.db_system,
                     "db.operation": "SELECT",
                     "db.name": "appdb",
                     "order.id": order_id,
@@ -235,7 +191,7 @@ async def get_order(order_id: str, request: Request):
             ) as db_span:
                 db_start = time.perf_counter()
                 try:
-                    row = await asyncio.to_thread(query_order, order_id)
+                    row = await asyncio.to_thread(almacen.obtener_pedido, order_id)
                 except Exception as exc:
                     span_status_error(db_span, exc)
                     log.error(

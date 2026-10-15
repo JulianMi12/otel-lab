@@ -21,8 +21,8 @@ import random
 import time
 
 from fastapi import FastAPI, HTTPException
-from psycopg2.pool import ThreadedConnectionPool
 
+from common.datastore import crear_almacen
 from common.telemetry import (
     current_trace_id,
     instrument_fastapi,
@@ -73,62 +73,12 @@ active_requests = meter.create_up_down_counter(
     unit="1",
 )
 
-db_pool = None
-
-
-def init_db_pool(retries=10, delay=2.0):
-    global db_pool
-    for attempt in range(1, retries + 1):
-        try:
-            db_pool = ThreadedConnectionPool(minconn=2, maxconn=20, dsn=DB_DSN)
-            log.info("Pool de PostgreSQL inicializado", extra={"intento": attempt})
-            return
-        except Exception as exc:
-            log.warning(
-                "PostgreSQL no disponible, reintentando",
-                extra={"intento": attempt, "error": str(exc)},
-            )
-            time.sleep(delay)
-    raise RuntimeError("No se pudo conectar a PostgreSQL tras varios intentos")
-
-
-def query_inventory(product_id):
-    conn = db_pool.getconn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT product, available, reserved, warehouse "
-                "FROM inventory WHERE product = %s",
-                (product_id,),
-            )
-            return cur.fetchone()
-    finally:
-        db_pool.putconn(conn)
-
-
-def reserve_inventory(product_id, quantity):
-    """
-    Reserva stock de forma atomica. La clausula WHERE available >= quantity
-    evita sobreventa bajo concurrencia sin bloquear la tabla.
-    """
-    conn = db_pool.getconn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE inventory SET available = available - %s, "
-                "reserved = reserved + %s "
-                "WHERE product = %s AND available >= %s "
-                "RETURNING available, reserved",
-                (quantity, quantity, product_id, quantity),
-            )
-            result = cur.fetchone()
-        conn.commit()
-        return result
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        db_pool.putconn(conn)
+# -----------------------------------------------------------------------------
+# Acceso a datos
+# -----------------------------------------------------------------------------
+# PostgreSQL si esta disponible; en memoria si no. Permite desplegar en la nube
+# sin una base de datos gestionada, que es el unico recurso con costo continuo.
+almacen = None
 
 
 app = FastAPI(
@@ -140,14 +90,18 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def on_startup():
-    init_db_pool()
-    log.info("service-b listo", extra={"latency_jitter_ms": LATENCY_JITTER_MS})
+    global almacen
+    almacen = crear_almacen(log)
+    log.info(
+        "service-b listo",
+        extra={"latency_jitter_ms": LATENCY_JITTER_MS, "almacen": almacen.tipo},
+    )
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    if db_pool:
-        db_pool.closeall()
+    if almacen:
+        almacen.cerrar()
     tel.shutdown()
 
 
@@ -164,6 +118,7 @@ async def root():
     return {
         "service": SERVICE_NAME,
         "otel_enabled": tel.enabled,
+        "almacen": almacen.tipo if almacen else "no inicializado",
         "endpoints": ["/inventory/{product}", "/inventory/{product}/reserve", "/health"],
     }
 
@@ -187,7 +142,7 @@ async def get_inventory(product_id: str):
         with tracer.start_as_current_span(
             "inventory.lookup.db",
             attributes={
-                "db.system": "postgresql",
+                "db.system": almacen.db_system,
                 "db.operation": "SELECT",
                 "db.name": "appdb",
                 "product.id": product_id,
@@ -195,7 +150,7 @@ async def get_inventory(product_id: str):
         ) as db_span:
             db_start = time.perf_counter()
             try:
-                row = await asyncio.to_thread(query_inventory, product_id)
+                row = await asyncio.to_thread(almacen.obtener_inventario, product_id)
             except Exception as exc:
                 span_status_error(db_span, exc)
                 log.error(
@@ -287,7 +242,7 @@ async def reserve(product_id: str, quantity: int = 1):
         with tracer.start_as_current_span(
             "inventory.reserve",
             attributes={
-                "db.system": "postgresql",
+                "db.system": almacen.db_system,
                 "db.operation": "UPDATE",
                 "product.id": product_id,
                 "reserve.quantity": quantity,
@@ -295,7 +250,7 @@ async def reserve(product_id: str, quantity: int = 1):
         ) as span:
             try:
                 result = await asyncio.to_thread(
-                    reserve_inventory, product_id, quantity
+                    almacen.reservar, product_id, quantity
                 )
             except Exception as exc:
                 span_status_error(span, exc)
