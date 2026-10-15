@@ -17,6 +17,13 @@
 
 set -euo pipefail
 
+# Git Bash (MSYS) reescribe los argumentos que parecen rutas absolutas de Unix:
+# "/scripts/load.js" se convierte en "C:/Program Files/Git/scripts/load.js"
+# antes de llegar al contenedor, y k6 no encuentra el script. Esta variable
+# desactiva esa conversión. En Linux y macOS no tiene ningún efecto.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
+
 cd "$(dirname "$0")/.."
 
 # ── Parámetros ──────────────────────────────────────────────────────────────

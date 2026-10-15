@@ -26,3 +26,6 @@ venv/
 # Sistema operativo
 .DS_Store
 Thumbs.db
+
+# El reporte se regenera desde docs/generar_reporte.py; el HTML es intermedio
+docs/reporte-tecnico.html

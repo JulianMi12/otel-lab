@@ -23,6 +23,13 @@ import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
 import { randomSeed } from 'k6';
 
+// El 5% del tráfico consulta pedidos inexistentes a propósito, para ejercitar
+// el camino de error. Por defecto k6 contabiliza cualquier 4xx como petición
+// fallida, lo que inflaría http_req_failed con errores que son el resultado
+// CORRECTO de la prueba. Declarar 404 como estado esperado hace que la tasa de
+// error del benchmark refleje solo fallos reales del servicio.
+http.setResponseCallback(http.expectedStatuses(200, 404));
+
 // ── Parámetros de la corrida ────────────────────────────────────────────────
 const TARGET   = __ENV.TARGET   || 'http://service-a:8000';
 const SCENARIO = __ENV.SCENARIO || 'instrumented';
