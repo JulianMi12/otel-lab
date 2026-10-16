@@ -1,0 +1,77 @@
+# ════════════════════════════════════════════════════════════════════════════
+# docker-compose.chaos.yaml — Overlay para los experimentos de Chaos Engineering
+#
+# Se aplica SOBRE docker-compose.yaml, sin modificarlo:
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.chaos.yaml up -d
+#
+# El stack normal queda intacto. Volver al modo habitual es simplemente
+# levantar sin este archivo.
+#
+# Qué añade y por qué:
+#
+#   NET_ADMIN  — `tc qdisc` manipula la disciplina de colas del kernel en el
+#                namespace de red del contenedor. Sin esta capacidad, tc falla
+#                con "Operation not permitted". Es el equivalente local de lo
+#                que Chaos Mesh hace con NetworkChaos: inyectar latencia REAL
+#                de red, no un time.sleep() dentro de la aplicación.
+#
+# Las herramientas (iproute2, stress-ng) NO se añaden a la imagen: se instalan
+# en caliente sobre el contenedor en ejecución desde los scripts de
+# experimento. Así la imagen que se despliega en producción no lleva utilidades
+# de ataque, que es justo lo que se espera de un Game Day bien planteado.
+# ════════════════════════════════════════════════════════════════════════════
+
+services:
+  # ── Toxiproxy: inyector de fallos de red ──────────────────────────────────
+  # Se interpone entre service-a y service-b. La aplicación NO sabe que existe:
+  # para service-a es simplemente el host al que llama, y para service-b la
+  # petición llega igual que siempre.
+  #
+  # Por qué Toxiproxy y no `tc netem`:
+  #   El kernel de Docker Desktop sobre WSL2 es minimalista y no incluye el
+  #   módulo `sch_netem`, de modo que `tc qdisc add ... netem` falla con
+  #   "Specified qdisc kind is unknown" y /lib/modules está vacío, por lo que
+  #   tampoco puede cargarse. Toxiproxy consigue el mismo efecto observable
+  #   -latencia real en el transporte, externa a la aplicación- sin depender
+  #   de módulos del kernel.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: otel-toxiproxy
+    command: ["-host", "0.0.0.0", "-config", "/config/proxies.json"]
+    volumes:
+      - ./chaos/toxiproxy.json:/config/proxies.json:ro
+    ports:
+      - "8474:8474"   # API de control: crear y retirar "toxics"
+      - "8666:8666"   # proxy hacia service-b
+    networks: [otel-net]
+    depends_on:
+      - service-b
+
+  # ── Grafana con Explore habilitado para el usuario anónimo ───────────────
+  # El rol Viewer por defecto no da acceso a Explore, y las capturas de
+  # evidencia del Game Day necesitan consultas LogQL filtradas (por ejemplo
+  # los logs de degradación), no sólo los paneles fijos del dashboard. Sin
+  # esto, la URL de Explore redirige a la página de inicio de Grafana.
+  grafana:
+    environment:
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+
+  service-b:
+    # Blast radius del experimento: sólo este contenedor recibe la capacidad.
+    # service-a, la base de datos y todo el stack de observabilidad quedan
+    # fuera del alcance de los faults.
+    cap_add:
+      - NET_ADMIN
+
+  service-a:
+    # service-a llama a service-b A TRAVÉS del proxy. Este es el único cambio
+    # que el modo caos introduce en la aplicación, y es de configuración: no
+    # hay ni una línea de código que sepa que existe un experimento en curso.
+    environment:
+      SERVICE_B_URL: http://toxiproxy:8666
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      toxiproxy:
+        condition: service_started

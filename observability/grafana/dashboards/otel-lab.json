@@ -2,25 +2,43 @@
   "uid": "otel-lab-main",
   "title": "OTel Lab — Pipeline de Observabilidad End-to-End",
   "description": "SLIs de los microservicios, overhead de recursos y salud del OTel Collector. Todas las queries filtran source=\"collector\" porque las métricas llegan por dos caminos (scraping directo y vía Collector) y sin el filtro se contarían dos veces.",
-  "tags": ["opentelemetry", "sli", "observabilidad"],
+  "tags": [
+    "opentelemetry",
+    "sli",
+    "observabilidad"
+  ],
   "timezone": "browser",
   "editable": true,
   "schemaVersion": 39,
   "version": 1,
   "refresh": "10s",
-  "time": { "from": "now-30m", "to": "now" },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
         "name": "servicio",
         "label": "Servicio",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
         "query": "label_values(http_requests_total{source=\"collector\"}, service)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
-        "current": { "selected": true, "text": ["All"], "value": ["$__all"] }
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
       }
     ]
   },
@@ -28,7 +46,12 @@
     {
       "type": "row",
       "title": "SLIs — Indicadores de Nivel de Servicio",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "collapsed": false
     },
     {
@@ -36,8 +59,16 @@
       "type": "stat",
       "title": "SLI-1 · Disponibilidad",
       "description": "Porcentaje de peticiones que NO terminan en error del servidor. Los 4xx se cuentan como disponibles: un 404 es una respuesta correcta a una petición inválida, no una caída del servicio.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 1 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
       "targets": [
         {
           "refId": "A",
@@ -54,9 +85,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 99 },
-              { "color": "green", "value": 99.9 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 99
+              },
+              {
+                "color": "green",
+                "value": 99.9
+              }
             ]
           }
         },
@@ -66,7 +106,13 @@
         "graphMode": "area",
         "colorMode": "value",
         "textMode": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       }
     },
     {
@@ -74,8 +120,16 @@
       "type": "timeseries",
       "title": "SLI-2 · Latencia p50 / p95 / p99",
       "description": "Percentiles calculados sobre el histograma de OTel. El p99 es el valor que se compara en el análisis de overhead: refleja la cola lenta, donde el costo de la instrumentación se nota más que en la media.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 12, "x": 6, "y": 1 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 6,
+        "y": 1
+      },
       "targets": [
         {
           "refId": "A",
@@ -107,22 +161,65 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "p99" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "p95" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "p50" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
           }
         ]
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
@@ -130,8 +227,16 @@
       "type": "stat",
       "title": "SLI-3 · Tasa de error (5xx)",
       "description": "Proporción de peticiones que terminan en error del servidor. Es el complemento directo del SLI de disponibilidad y la señal que dispara una alerta de guardia.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 1 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
       "targets": [
         {
           "refId": "A",
@@ -147,9 +252,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 1 },
-              { "color": "red", "value": 5 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
             ]
           }
         },
@@ -158,7 +272,13 @@
       "options": {
         "graphMode": "area",
         "colorMode": "value",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       }
     },
     {
@@ -166,8 +286,16 @@
       "type": "timeseries",
       "title": "SLI-4 · Throughput (peticiones por segundo)",
       "description": "Tasa de peticiones desglosada por servicio y endpoint. Durante el benchmark debe mantenerse estable: una caída del throughput con la misma carga indica saturación.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
       "targets": [
         {
           "refId": "A",
@@ -184,14 +312,27 @@
             "lineWidth": 2,
             "fillOpacity": 15,
             "showPoints": "never",
-            "stacking": { "mode": "normal", "group": "A" }
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
           }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
@@ -199,8 +340,16 @@
       "type": "timeseries",
       "title": "Latencia de base de datos por operación",
       "description": "p95 de las queries a PostgreSQL. Permite distinguir si una latencia alta del endpoint viene de la base de datos o del salto HTTP entre servicios.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
       "targets": [
         {
           "refId": "A",
@@ -212,19 +361,38 @@
         "defaults": {
           "unit": "s",
           "decimals": 4,
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
       "type": "row",
       "title": "Overhead de recursos — CPU y memoria por contenedor",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
       "collapsed": false
     },
     {
@@ -232,8 +400,16 @@
       "type": "timeseries",
       "title": "CPU por contenedor — instrumentado vs. línea base",
       "description": "Medido por el receiver docker_stats del Collector, desde fuera del proceso. Los contenedores *-baseline corren el MISMO código con OTEL_ENABLED=false: la diferencia entre ambas series es el costo de CPU de la instrumentación.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 17 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
       "targets": [
         {
           "refId": "A",
@@ -246,25 +422,69 @@
           "unit": "percent",
           "decimals": 2,
           "min": 0,
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byRegexp", "options": ".*baseline.*" },
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*baseline.*"
+            },
             "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
-              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 4] } }
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "otel-collector" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "otel-collector"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
           }
         ]
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
@@ -272,8 +492,16 @@
       "type": "timeseries",
       "title": "Memoria por contenedor — instrumentado vs. línea base",
       "description": "Memoria residente. El SDK de OTel añade un costo base fijo (providers, exporters y buffers de los procesadores por lotes) que se observa como un desplazamiento constante respecto a la línea base.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 17 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
       "targets": [
         {
           "refId": "A",
@@ -286,27 +514,65 @@
           "unit": "bytes",
           "decimals": 1,
           "min": 0,
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byRegexp", "options": ".*baseline.*" },
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*baseline.*"
+            },
             "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
-              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 4] } }
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
             ]
           }
         ]
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
       "type": "row",
       "title": "Salud del OTel Collector",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
       "collapsed": false
     },
     {
@@ -314,8 +580,16 @@
       "type": "timeseries",
       "title": "Collector · Señales aceptadas por tipo",
       "description": "Volumen de las tres señales entrando al Collector. Si una de las tres cae a cero mientras las otras siguen, el problema está en el SDK de esa señal concreta, no en el Collector.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
       "targets": [
         {
           "refId": "A",
@@ -338,13 +612,27 @@
           "unit": "short",
           "decimals": 1,
           "min": 0,
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never" }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never"
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -352,8 +640,16 @@
       "type": "timeseries",
       "title": "Collector · Errores — rechazos, descartes y envíos fallidos",
       "description": "Panel de errores del Collector. Cualquier serie por encima de cero significa PÉRDIDA de telemetría: rechazos indican contrapresión del memory_limiter; los envíos fallidos, un backend caído o inalcanzable.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
       "targets": [
         {
           "refId": "A",
@@ -386,21 +682,42 @@
           "unit": "short",
           "decimals": 2,
           "min": 0,
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "showPoints": "auto" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "showPoints": "auto"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 0.001 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.001
+              }
             ]
           },
-          "color": { "mode": "thresholds" }
+          "color": {
+            "mode": "thresholds"
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max"] },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -408,8 +725,16 @@
       "type": "timeseries",
       "title": "Collector · Ocupación de la cola de exportación",
       "description": "Si la cola se acerca a su capacidad, el Collector no está drenando hacia los backends al ritmo que recibe y empezará a descartar telemetría.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 35 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
       "targets": [
         {
           "refId": "A",
@@ -427,21 +752,49 @@
           "unit": "short",
           "decimals": 0,
           "min": 0,
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Capacidad" },
+            "matcher": {
+              "id": "byName",
+              "options": "Capacidad"
+            },
             "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
-              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
             ]
           }
         ]
       },
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -449,8 +802,16 @@
       "type": "logs",
       "title": "Logs correlacionados — haz clic en un trace_id para saltar a la traza",
       "description": "Logs en vivo desde Loki. Cada línea lleva el trace_id del request que la produjo; los derivedFields del datasource lo convierten en un enlace directo a Jaeger. Este panel es el punto de partida de la correlación log → traza.",
-      "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 35 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
       "targets": [
         {
           "refId": "A",
@@ -464,6 +825,39 @@
         "showCommonLabels": false,
         "wrapLogMessage": true,
         "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 12,
+      "type": "logs",
+      "title": "Game Day · Logs de degradación (service-b inalcanzable)",
+      "description": "Filtra los logs que emite service-a cuando su dependencia no responde. Durante el experimento de partición de red (E3) estas líneas son la prueba de que el fallback actuó: el servicio registró el fallo y degradó la respuesta en lugar de propagar un error 5xx al cliente. Fuera de un experimento este panel debe estar vacío.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service_name=\"service-a\"} |= \"inalcanzable\"",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": true,
         "enableLogDetails": true,
         "dedupStrategy": "none",
         "sortOrder": "Descending"

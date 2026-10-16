@@ -32,3 +32,7 @@ docs/reporte-tecnico.html
 
 # Artefactos generados por el hook de revision de codigo
 PR_DETAILS_*.md
+
+# Artefacto intermedio del Game Day (el PDF sí se versiona)
+chaos/plan-gameday.html
+chaos/resultados/*.log

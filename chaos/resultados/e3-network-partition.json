@@ -1,0 +1,19 @@
+{
+  "experimento": "E3 - Particion de red",
+  "tipo_fallo": "network partition",
+  "herramienta": "docker network disconnect",
+  "objetivo": "service-b",
+  "duracion_s": 120.0,
+  "p99_base_ms": 481.199,
+  "p99_chaos_ms": 7475.0,
+  "p99_post_ms": 436.008,
+  "disponibilidad_base": 100.0,
+  "disponibilidad_chaos": "",
+  "disponibilidad_post": 100.0,
+  "throughput_base": 3.104,
+  "throughput_chaos": "",
+  "fallbacks_base": 0.0,
+  "fallbacks_chaos": 836.0,
+  "mttd_s": 16.0,
+  "recuperacion_s": 56.0
+}

@@ -1,0 +1,8 @@
+[
+  {
+    "name": "service-b",
+    "listen": "0.0.0.0:8666",
+    "upstream": "service-b:8001",
+    "enabled": true
+  }
+]
