@@ -472,6 +472,37 @@ lo que se construyó, más una hoja de ruta a tres meses:
 
 ---
 
+### Modo reposo
+
+El despliegue en ECS queda **a cero réplicas**: ECS no ejecuta ninguna task y
+deja de cobrar por cómputo, pero nada se destruye. El clúster, los servicios,
+las definiciones de tarea, la red, las imágenes, las alarmas y los Flow Logs
+siguen ahí y se pueden inspeccionar.
+
+```bash
+# Levantarlo para una demostración
+terraform -chdir=terraform/aws apply -var="desired_count=1"
+
+# Volver a reposo
+terraform -chdir=terraform/aws apply -var="desired_count=0"
+```
+
+Lo único que sigue cobrando es el balanceador: un ALB cobra por existir y no
+se puede parar, solo borrar. Se conserva a propósito para que la arquitectura
+siga siendo visible al completo.
+
+| | Activo | En reposo |
+|---|---:|---:|
+| Cómputo (3 tasks Fargate) | 3,55 USD/día | 0 |
+| Balanceador | 0,54 USD/día | 0,54 USD/día |
+| Base de datos | 0,38 USD/día | 0,38 USD/día |
+| Red, registro de imágenes, alarmas, logs | 0 | 0 |
+
+Cifras de tarifa, no medidas. Hay un presupuesto con avisos configurado en la
+cuenta para que una desviación no pase desapercibida.
+
+---
+
 ## Estructura del repositorio
 
 ```
