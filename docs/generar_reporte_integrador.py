@@ -132,10 +132,10 @@ MADUREZ = [
      "SLO expl&iacute;citos y tasa de quemado; sin revisi&oacute;n peri&oacute;dica"),
     (5, "Alertado y respuesta", 3, "parcial",
      "Seis pol&iacute;ticas con runbook; sin rotaci&oacute;n de guardia"),
-    (6, "Infraestructura y red", 2, "no",
-     "Flow Logs y m&eacute;tricas definidas en ambas nubes, sin desplegar"),
-    (7, "Seguridad", 2, "no",
-     "mTLS estricto y autorizaci&oacute;n por identidad, sin aplicar a un cl&uacute;ster"),
+    (6, "Infraestructura y red", 3, "s&iacute;",
+     "Flow Logs activos en AWS; 25.683 registros en 20 minutos"),
+    (7, "Seguridad", 3, "parcial",
+     "Detecci&oacute;n de red en ejecuci&oacute;n; mTLS de la malla a&uacute;n sin aplicar"),
     (8, "Resiliencia y experimentaci&oacute;n", 4, "s&iacute;",
      "Cuatro experimentos con probes SOT/DuringChaos/EOT y rollback"),
 ]
@@ -532,6 +532,29 @@ y lo que cuesta es cruzarlas; por eso el despliegue env&iacute;a todo a CloudWat
 Logs y deja las consultas de investigaci&oacute;n guardadas como c&oacute;digo, incluida la
 que parte de un <code>trace_id</code> y devuelve los logs de esa petici&oacute;n.</p>
 
+<h3>Lo que detect&oacute; nada m&aacute;s encenderse</h3>
+
+<p>La parte de red se despleg&oacute; en AWS y empez&oacute; a producir se&ntilde;al de inmediato:
+<strong>25.683 registros de flujo en veinte minutos</strong>. Entre ellos, tr&aacute;fico
+que nadie del equipo gener&oacute;:</p>
+
+<pre><code>REJECT  69.5.169.18:47204     -> 10.20.0.133:6789
+REJECT  147.185.133.162       -> 10.20.0.133        (ICMP)
+REJECT  162.219.178.250:24314 -> 10.20.0.133:23     (telnet)</code></pre>
+
+<p>Son escaneos de fondo de internet contra las IP p&uacute;blicas del despliegue, y
+<strong>dos de las tres alarmas pasaron a estado ALARM por s&iacute; solas</strong>:
+<code>escaneo-de-puertos</code> y <code>puertos-sensibles</code>. Ninguna se
+provoc&oacute;.</p>
+
+<p>El dato tiene dos lecturas, y la segunda es la interesante. La primera es que
+la detecci&oacute;n funciona sobre tr&aacute;fico real y no sobre un caso de prueba. La
+segunda es que <em>ese ruido existe siempre</em>: cualquier direcci&oacute;n p&uacute;blica
+recibe escaneos constantes, y una alerta que salta con el primero que pasa se
+vuelve inservible en un d&iacute;a. El umbral de veinte conexiones rechazadas en cinco
+minutos no es un n&uacute;mero de manual &mdash; es el que separa el ruido de fondo de un
+intento dirigido, y s&oacute;lo se puede calibrar midi&eacute;ndolo.</p>
+
 <div class="nota">
 <strong>Sobre el coste.</strong> GuardDuty y Security Hub quedan desactivados por
 defecto (<code>habilitar_seguridad_avanzada = false</code>): son los &uacute;nicos
@@ -655,8 +678,28 @@ producido todav&iacute;a una alerta nueva.</p>
     <td>C&oacute;digo del cliente HTTP</td></tr>
 <tr><td>Destino de las se&ntilde;ales</td><td colspan="2">Cloud Trace · Managed Prometheus · Cloud Logging</td>
     <td>X-Ray · CloudWatch</td></tr>
-<tr><td>Coste en reposo</td><td>&asymp; 0</td><td>&asymp; 0,20 USD/h</td><td>&asymp; 0,05 USD/h</td></tr>
+<tr><td>Coste en reposo</td><td>&asymp; 0 (escala a cero)</td><td>&asymp; 0,20 USD/h</td><td>&asymp; 0,19 USD/h</td></tr>
+<tr><td>Estado</td><td><strong>Desplegado y verificado</strong></td><td>Definido como c&oacute;digo</td>
+    <td><strong>Desplegado y verificado</strong></td></tr>
 </table>
+
+<p>Los dos despliegues serverless est&aacute;n <strong>vivos y comprobados de extremo a
+extremo</strong>: una petici&oacute;n atraviesa los tres servicios y las tres se&ntilde;ales
+comparten <code>trace_id</code> en ambas nubes. El mapa de servicios que compone
+AWS a partir de las trazas recibidas refleja exactamente la arquitectura
+dise&ntilde;ada, sin que nadie se la haya descrito:</p>
+
+<table>
+<tr><th>Nodo</th><th>Tipo</th><th class="num">Peticiones correctas</th><th class="num">Errores</th></tr>
+<tr><td><code>service-a</code></td><td>Contenedor gestionado</td><td class="num">7</td><td class="num">0</td></tr>
+<tr><td><code>service-b</code></td><td>Contenedor gestionado</td><td class="num">6</td><td class="num">0</td></tr>
+<tr><td><code>data-service</code></td><td>Contenedor gestionado</td><td class="num">6</td><td class="num">0</td></tr>
+<tr><td><code>appdb</code></td><td>Database::SQL</td><td class="num">18</td><td class="num">0</td></tr>
+</table>
+
+<p>Las 18 consultas a base de datos frente a 19 peticiones HTTP son la huella de
+la arquitectura: cada pedido dispara una lectura en <code>service-a</code>, otra
+en <code>service-b</code> y la agregaci&oacute;n anal&iacute;tica en <code>data-service</code>.</p>
 
 <p>La misma imagen corre en los tres. <code>service-a</code> detecta el entorno por
 el esquema de la URL del destino: si es <code>https://</code> pide un token de
@@ -755,6 +798,16 @@ partida de quien responde: en lugar de buscar un ejemplo, abre el que ya tiene.
 El criterio de selecci&oacute;n importa tanto como el mecanismo &mdash;la traza debe
 haber fallado <em>para el cliente</em>, porque un error interno que el sistema
 absorbi&oacute; no explica un incidente, explica por qu&eacute; no lo hubo.</p>
+
+<p><strong>Desplegar de verdad encuentra lo que ning&uacute;n entorno local encuentra.</strong>
+El esquema de la base de datos depend&iacute;a de una particularidad de la imagen
+oficial de PostgreSQL: el contenedor ejecuta los scripts de inicializaci&oacute;n al
+crear su volumen, pero una base gestionada no tiene ese mecanismo. En local
+nunca fall&oacute;; en la nube, el primer pedido devolvi&oacute; <code>relation "orders"
+does not exist</code>. La correcci&oacute;n &mdash;que el propio servicio garantice su
+esquema con un script idempotente&mdash; es lo que hace que la misma imagen sirva
+en los tres entornos sin pasos manuales. El mismo patr&oacute;n se repiti&oacute; con un
+exporter del Collector que existe en una distribuci&oacute;n y no en otra.</p>
 
 <p><strong>Un experimento que s&oacute;lo sabe confirmar no es un experimento.</strong> Los
 cuatro experimentos verifican el estado estable antes de inyectar, comprueban
