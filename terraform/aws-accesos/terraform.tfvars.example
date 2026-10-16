@@ -1,0 +1,8 @@
+# Copia a terraform.tfvars y ajusta.
+aws_profile = "TU-PERFIL"
+region      = "us-east-2"
+
+usuarios = {
+  "persona@ejemplo.com" = "administrador"
+  "revisor@ejemplo.com" = "lectura"
+}

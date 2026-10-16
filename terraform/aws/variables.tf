@@ -216,26 +216,6 @@ variable "habilitar_seguridad_avanzada" {
   default     = false
 }
 
-# ── Acceso de personas ──────────────────────────────────────────────────────
-variable "usuarios" {
-  description = <<-EOT
-    Personas con acceso a la consola, como mapa de correo a nivel.
-    Niveles validos: "administrador" (crea y destruye infraestructura) y
-    "lectura" (inspecciona sin modificar).
-    Vacio por defecto: un usuario de consola es una credencial viva y no debe
-    existir mientras no haga falta.
-  EOT
-  type        = map(string)
-  default     = {}
-
-  validation {
-    condition = alltrue([
-      for nivel in values(var.usuarios) : contains(["administrador", "lectura"], nivel)
-    ])
-    error_message = "Cada usuario debe tener nivel \"administrador\" o \"lectura\"."
-  }
-}
-
 variable "zonas" {
   description = <<-EOT
     Zonas de disponibilidad, nombradas de forma explicita.

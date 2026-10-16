@@ -34,6 +34,8 @@
 # ════════════════════════════════════════════════════════════════════════════
 
 locals {
+  nombre = var.project_name
+
   # AWS admite el correo como nombre de usuario de IAM: el juego de caracteres
   # permitido incluye @ . - _ +. Usarlo evita tener que mantener un mapa entre
   # nombres cortos y personas, que es justo donde se pierde la trazabilidad de
