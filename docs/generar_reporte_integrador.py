@@ -212,6 +212,30 @@ EVIDENCIAS_GCP = "\n".join(filter(None, [
               "Las m&eacute;tricas de la aplicaci&oacute;n, sin servidor que mantener."),
 ]))
 
+EVIDENCIAS_AWS = "\n".join(filter(None, [
+    evidencia("aws-01-xray-service-map.png", "AWS", "et-g",
+              "Mapa de servicios reconstruido desde las trazas",
+              "Nadie describio esta topologia: la plataforma la deduce de los "
+              "<code>traceparent</code> que viajan entre servicios. Coincide con la "
+              "arquitectura disenada, incluido el nodo de base de datos."),
+    evidencia("aws-02-xray-traza.png", "AWS", "et-g",
+              "Una peticion, tres servicios y la base",
+              "Cascada completa bajo un unico identificador: 35 ms en total, con "
+              "<code>service-b</code> y <code>data-service</code> ejecutandose en "
+              "paralelo y los <code>SELECT</code> anidados bajo cada uno."),
+    evidencia("aws-03-cloudwatch-logs.png", "AWS", "et-g",
+              "Logs de los tres servicios filtrados por trace_id",
+              "El mismo identificador recupera las diez lineas que produjo la "
+              "peticion, emitidas por tres procesos distintos. Es la correlacion "
+              "traza-log funcionando sin herramientas propietarias."),
+    evidencia("aws-04-alarmas.png", "AWS", "et-g",
+              "Deteccion de red sobre trafico real",
+              "Dos alarmas en rojo que nadie provoco, por escaneos de fondo contra "
+              "las IP publicas. La tercera, en verde, mide el volumen de salida y "
+              "confirma que no hay fuga."),
+]))
+
+
 EVIDENCIAS_D = "\n".join(filter(None, [
     evidencia("chaos-01-dashboard-incidente.png", "CAOS", "et-l",
               "El incidente en el panel",
@@ -716,6 +740,14 @@ despliegue concreto.</p>
 
 <div class="ev-grid">%(ev_gcp)s</div>
 
+<h3>El mismo pipeline en la otra nube</h3>
+
+<p>Las capturas siguientes son del segundo proveedor y muestran exactamente las
+mismas capacidades sobre herramientas distintas. No hubo cambios de codigo entre
+un despliegue y otro: solo una configuracion distinta del Collector.</p>
+
+<div class="ev-grid">%(ev_aws)s</div>
+
 <h2 class="salto">9. C&oacute;mo reproducir el laboratorio</h2>
 
 <p>El repositorio se entrega etiquetado como <code>v1.0</code>. La estructura
@@ -848,6 +880,7 @@ contexto = {
     "ev_b": EVIDENCIAS_B,
     "ev_d": EVIDENCIAS_D,
     "ev_gcp": EVIDENCIAS_GCP,
+    "ev_aws": EVIDENCIAS_AWS,
     "e3_pico": num(E3.get("p99_chaos_ms"), "%.0f"),
     "e3_fallbacks": num(E3.get("fallbacks_chaos"), "%.0f"),
     "inc_inicio": INC.get("inicio", "sin dato")[:19].replace("T", " "),
