@@ -4,8 +4,8 @@ output "politicas_que_notifican" {
     google_monitoring_alert_policy.correlacion_multisenal.display_name,
     google_monitoring_alert_policy.presupuesto_error.display_name,
     google_monitoring_alert_policy.ausencia_de_senal.display_name,
-    google_monitoring_alert_policy.movimiento_lateral.display_name,
-    google_monitoring_alert_policy.mtls_roto.display_name,
+    google_monitoring_alert_policy.autorizacion_denegada.display_name,
+    google_monitoring_alert_policy.reconocimiento.display_name,
     google_monitoring_alert_policy.exfiltracion.display_name,
   ]
 }
@@ -27,8 +27,8 @@ output "metricas_de_seguridad" {
   description = "Metricas derivadas de logs creadas por el Modulo C"
   value = [
     google_logging_metric.autorizacion_denegada.name,
-    google_logging_metric.trafico_sin_mtls.name,
-    google_logging_metric.conexiones_bloqueadas.name,
-    google_logging_metric.salida_a_internet_bytes.name,
+    google_logging_metric.actividad_administrativa.name,
+    google_logging_metric.reconocimiento.name,
+    google_logging_metric.salida_bytes.name,
   ]
 }

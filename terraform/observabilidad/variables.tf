@@ -18,6 +18,17 @@ variable "email_alertas" {
   type        = string
 }
 
+variable "desplegar_metricas_malla" {
+  description = <<-EOT
+    Crea tambien las metricas que miden los logs de acceso de los sidecars de
+    Istio. Solo tienen sentido con el cluster levantado: sin el no recibirian
+    un solo dato, y un panel vacio parece funcionar hasta que alguien lo mira
+    de cerca.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "subred_cluster" {
   description = <<-EOT
     Nombre de la subred cuyos Flow Logs se analizan en el Modulo C.
@@ -81,4 +92,15 @@ variable "umbral_exfiltracion_mb" {
   EOT
   type        = number
   default     = 50
+}
+
+variable "umbral_respuesta_maxima_kb" {
+  description = <<-EOT
+    Tamano, en KB, a partir del cual una respuesta individual se considera
+    anomala. Las respuestas de esta API son objetos JSON de unos cientos de
+    bytes; 256 KB deja margen de sobra y sigue siendo tres ordenes de magnitud
+    menos que una extraccion masiva.
+  EOT
+  type        = number
+  default     = 256
 }

@@ -134,8 +134,8 @@ MADUREZ = [
      "Seis pol&iacute;ticas con runbook; sin rotaci&oacute;n de guardia"),
     (6, "Infraestructura y red", 3, "s&iacute;",
      "Flow Logs activos en AWS; 25.683 registros en 20 minutos"),
-    (7, "Seguridad", 3, "parcial",
-     "Detecci&oacute;n de red en ejecuci&oacute;n; mTLS de la malla a&uacute;n sin aplicar"),
+    (7, "Seguridad", 4, "s&iacute;",
+     "Detecci&oacute;n en ambas nubes sobre tr&aacute;fico real; falta el mTLS de la malla"),
     (8, "Resiliencia y experimentaci&oacute;n", 4, "s&iacute;",
      "Cuatro experimentos con probes SOT/DuringChaos/EOT y rollback"),
 ]
@@ -538,15 +538,29 @@ Logs y logs de acceso L7 de los sidecars&mdash; sin agentes nuevos.</p>
 
 <table>
 <tr><th>Pregunta</th><th>Se&ntilde;al</th><th>GCP</th><th>AWS</th></tr>
-<tr><td>&iquest;Qui&eacute;n intenta entrar y no lo consigue?</td><td>Conexiones rechazadas por firewall</td>
-    <td>M&eacute;trica derivada de logs</td><td>Metric filter sobre Flow Logs</td></tr>
-<tr><td>&iquest;Qui&eacute;n pide lo que no le corresponde?</td><td>403 de la malla con identidad SPIFFE</td>
-    <td>M&eacute;trica derivada de logs</td><td>&mdash; (sin malla en ECS)</td></tr>
-<tr><td>&iquest;Queda tr&aacute;fico interno sin cifrar?</td><td>Peticiones sin principal mTLS</td>
-    <td>M&eacute;trica derivada de logs</td><td>&mdash;</td></tr>
-<tr><td>&iquest;Sale m&aacute;s informaci&oacute;n de la habitual?</td><td>Bytes hacia destinos externos</td>
-    <td>M&eacute;trica con <code>value_extractor</code></td><td>Metric filter con <code>$bytes</code></td></tr>
+<tr><td>&iquest;A qui&eacute;n se le niega el paso?</td><td>Invocaciones rechazadas por identidad</td>
+    <td>403 de los servicios internos</td><td>Conexiones REJECT del firewall</td></tr>
+<tr><td>&iquest;Qui&eacute;n cambia la plataforma?</td><td>Operaciones administrativas</td>
+    <td>Audit Logs por identidad</td><td>&mdash;</td></tr>
+<tr><td>&iquest;Alguien est&aacute; sondeando?</td><td>Rutas y puertos que no existen</td>
+    <td>404 por ruta solicitada</td><td>Intentos contra SSH, RDP y telnet</td></tr>
+<tr><td>&iquest;Sale m&aacute;s informaci&oacute;n de la habitual?</td><td>Volumen de datos devuelto</td>
+    <td>p99 del tama&ntilde;o de respuesta</td><td>Bytes hacia destinos externos</td></tr>
 </table>
+
+<p>Las cuatro preguntas son las mismas en las dos nubes; las se&ntilde;ales que las
+responden, no. Esa es la parte interesante de hacerlo dos veces: obliga a
+separar <em>qu&eacute; se quiere saber</em> de <em>qu&eacute; dato lo responde aqu&iacute;</em>.
+Donde una plataforma da registros de flujo de red, la otra da el c&oacute;digo de
+respuesta de una invocaci&oacute;n rechazada por identidad &mdash; y ambas contestan a
+&laquo;&iquest;a qui&eacute;n se le niega el paso?&raquo;.</p>
+
+<p>El caso m&aacute;s claro es el de la exfiltraci&oacute;n. La plataforma que no expone
+el volumen de red obliga a medir el <strong>tama&ntilde;o de cada respuesta</strong>
+en lugar del total agregado, y la restricci&oacute;n resulta ser una mejora: un pico
+de tr&aacute;fico leg&iacute;timo multiplica el volumen total pero no cambia cu&aacute;nto
+devuelve cada petici&oacute;n. Una extracci&oacute;n masiva s&iacute; lo cambia, aunque sean
+cuatro peticiones y el total apenas se mueva.</p>
 
 <p>La comparaci&oacute;n entre nubes revela una diferencia de dise&ntilde;o. En GCP los Flow
 Logs llegan a Cloud Logging, que ya es el destino de todo lo dem&aacute;s, de modo que
@@ -558,7 +572,12 @@ que parte de un <code>trace_id</code> y devuelve los logs de esa petici&oacute;n
 
 <h3>Lo que detect&oacute; nada m&aacute;s encenderse</h3>
 
-<p>La parte de red se despleg&oacute; en AWS y empez&oacute; a producir se&ntilde;al de inmediato:
+<p>Las dos mitades est&aacute;n desplegadas y recibiendo datos. En una nube, las
+cuatro m&eacute;tricas registraron en doce minutos <strong>15 invocaciones rechazadas
+por identidad y 9 sondeos a rutas inexistentes</strong> frente a 12 peticiones
+leg&iacute;timas. En la otra, el resultado fue m&aacute;s contundente todav&iacute;a.</p>
+
+<p>La parte de red se despleg&oacute; y empez&oacute; a producir se&ntilde;al de inmediato:
 <strong>25.683 registros de flujo en veinte minutos</strong>. Entre ellos, tr&aacute;fico
 que nadie del equipo gener&oacute;:</p>
 

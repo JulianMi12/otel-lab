@@ -124,7 +124,7 @@ resource "google_monitoring_alert_policy" "umbral_laxo" {
 # ════════════════════════════════════════════════════════════════════════════
 resource "google_monitoring_alert_policy" "correlacion_multisenal" {
   display_name = "Incidente correlacionado — errores anomalos Y latencia sobre SLO"
-  combiner     = "AND"
+  combiner     = "OR"
 
   documentation {
     subject   = "Incidente en service-a: errores por encima del baseline y p99 sobre el SLO"
@@ -174,44 +174,41 @@ resource "google_monitoring_alert_policy" "correlacion_multisenal" {
     mime_type = "text/markdown"
   }
 
-  # ── Condicion 1: la tasa de error se sale de su propio baseline ───────────
+  # UNA sola condicion, no dos.
+  #
+  # Cloud Monitoring no admite varias condiciones PromQL en la misma politica:
+  #   "Alert policies with prometheus_query_language condition type can only
+  #    have a single condition"
+  #
+  # La correlacion se expresa entonces dentro de la propia consulta, con el
+  # operador `and` de PromQL: devuelve la serie izquierda solo donde la derecha
+  # tambien existe. El resultado es identico y de hecho mas fiel a la
+  # intencion, porque no son dos alertas que coinciden en el tiempo sino una
+  # unica condicion compuesta.
   conditions {
-    display_name = "error_rate por encima del baseline + 2 sigma"
+    display_name = "error_rate sobre baseline + 2 sigma Y p99 sobre el SLO"
 
     condition_prometheus_query_language {
-      # La subquery [1h:5m] evalua la expresion cada 5 minutos durante la
-      # ultima hora y produce la serie con la que se calculan media y
-      # desviacion. El `offset 5m` excluye el presente del baseline: sin el,
-      # una degradacion sostenida acabaria formando parte de su propio normal
-      # y la alerta se apagaria sola justo cuando mas falta hace.
       query = <<-PROMQL
-        (${chomp(local.promql_error_rate)})
-        >
         (
-          avg_over_time((${chomp(local.promql_error_rate)})[1h:5m] offset 5m)
-          + 2 * stddev_over_time((${chomp(local.promql_error_rate)})[1h:5m] offset 5m)
-          + 0.5
+          (${chomp(local.promql_error_rate)})
+          >
+          (
+            avg_over_time((${chomp(local.promql_error_rate)})[1h:5m] offset 5m)
+            + 2 * stddev_over_time((${chomp(local.promql_error_rate)})[1h:5m] offset 5m)
+            + 0.5
+          )
+        )
+        and
+        (
+          (${chomp(local.promql_p99)}) > ${var.slo_p99_ms / 1000}
         )
       PROMQL
 
-      # Tres minutos de persistencia. Es el equivalente del parametro `dwell`
-      # del detector de aiops/detector.py: un pico de un solo punto puede ser
-      # un GC o un arranque en frio, cosas que se arreglan solas antes de que
-      # nadie llegue al teclado.
-      duration            = "180s"
-      evaluation_interval = "60s"
-    }
-  }
-
-  # ── Condicion 2: el p99 viola el SLO ──────────────────────────────────────
-  conditions {
-    display_name = "p99 por encima del SLO de 1000 ms"
-
-    condition_prometheus_query_language {
-      # Aqui el umbral SI es fijo, y debe serlo: es el compromiso con el
-      # usuario. Una subida del 300 % sobre un baseline de 20 ms sigue estando
-      # dentro del objetivo y no justifica despertar a nadie.
-      query               = "${chomp(local.promql_p99)} > ${var.slo_p99_ms / 1000}"
+      # Tres minutos de persistencia, el equivalente del parametro `dwell` de
+      # aiops/detector.py: un pico de un solo punto puede ser un GC o un
+      # arranque en frio, cosas que se arreglan solas antes de que nadie
+      # llegue al teclado.
       duration            = "180s"
       evaluation_interval = "60s"
     }
@@ -224,12 +221,11 @@ resource "google_monitoring_alert_policy" "correlacion_multisenal" {
   alert_strategy {
     auto_close = "3600s"
 
-    notification_rate_limit {
-      # Un aviso cada diez minutos como maximo. Durante un incidente largo, la
-      # repeticion no aporta informacion nueva y entrena al equipo a ignorar
-      # el canal.
-      period = "600s"
-    }
+    # Sin `notification_rate_limit`: Cloud Monitoring solo lo admite en
+    # politicas basadas en logs.
+    #   "only log-based alert policies may specify a notification rate limit"
+    # El control de repeticion queda en manos de `auto_close`, que cierra el
+    # incidente tras una hora sin que la condicion se cumpla.
   }
 
   depends_on = [google_project_service.requeridas]

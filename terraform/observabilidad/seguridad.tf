@@ -1,5 +1,5 @@
 # ════════════════════════════════════════════════════════════════════════════
-# Modulo C — Observabilidad de red y seguridad
+# Modulo C — Observabilidad de red y seguridad en GCP
 #
 # La idea que organiza este archivo: las cuatro senales doradas de Google
 # (latencia, trafico, errores, saturacion) describen la SALUD de un sistema,
@@ -9,32 +9,205 @@
 # Lo que sigue define el equivalente para seguridad, con la misma disciplina:
 # pocas senales, cada una con una pregunta concreta detras.
 #
-#   Autenticacion   ¿Quien intenta entrar y no lo consigue?
-#   Autorizacion    ¿Quien, ya dentro, pide lo que no le corresponde?
-#   Cifrado         ¿Queda trafico interno sin proteger?
-#   Exfiltracion    ¿Esta saliendo mas informacion de la habitual?
+#   Autorizacion  ¿A quien se le esta negando el paso?
+#   Administracion ¿Quien cambia la configuracion de la plataforma?
+#   Reconocimiento ¿Alguien esta probando rutas que no existen?
+#   Exfiltracion  ¿Esta saliendo mas informacion de la habitual?
 #
-# Las cuatro se construyen sobre senales que YA se estan recogiendo: los VPC
-# Flow Logs de la subred del cluster y los logs de acceso L7 que emiten los
-# sidecars de Istio. No hay agentes nuevos ni instrumentacion extra.
+# POR QUE SOBRE CLOUD RUN Y NO SOBRE LA MALLA
+#
+#   La primera version de este archivo media sobre `k8s_container` y
+#   `gce_subnetwork`: logs de acceso de los sidecars de Istio y VPC Flow Logs
+#   del cluster. Es la version correcta cuando el cluster existe.
+#
+#   Pero el despliegue permanente de este laboratorio es Cloud Run, que no
+#   tiene ni sidecars ni subred propia. Aplicar aquella version habria creado
+#   cuatro metricas y un panel que nunca recibirian un solo dato: un tablero
+#   vacio que parece funcionar hasta que alguien lo mira de cerca, que es
+#   justo el tipo de observabilidad que este laboratorio critica.
+#
+#   Las metricas de abajo miden las mismas cuatro preguntas sobre las senales
+#   que Cloud Run SI produce. Las de la malla siguen disponibles detras de
+#   `desplegar_metricas_malla`, para cuando el cluster este levantado.
 # ════════════════════════════════════════════════════════════════════════════
 
 # ════════════════════════════════════════════════════════════════════════════
 # Metricas derivadas de logs
-#
-# Un log-based metric convierte un flujo de texto en una serie temporal. Es lo
-# que permite graficar y alertar sobre algo que nacio como una linea de log, y
-# sale mucho mas barato que conservar los logs crudos: la metrica se retiene
-# durante meses, el log que la produjo puede caducar en dias.
 # ════════════════════════════════════════════════════════════════════════════
 
-# ── 1. Autorizacion denegada en la malla ────────────────────────────────────
-# Istio devuelve 403 con el cuerpo "RBAC: access denied" cuando una
-# AuthorizationPolicy rechaza la llamada. Es la senal mas directa de
-# movimiento lateral: alguien que ya esta dentro del cluster intentando hablar
-# con un servicio que no le corresponde.
+# ── 1. Autorizacion denegada ────────────────────────────────────────────────
+# Cloud Run devuelve 403 cuando IAM rechaza la invocacion. En este despliegue
+# los servicios internos solo aceptan a la cuenta de servicio del orquestador,
+# asi que un 403 significa que alguien -o algo- intento invocarlos sin la
+# identidad correcta.
+#
+# No es teorico: durante el despliegue, la propagacion de los permisos de IAM
+# tardo unos minutos y las llamadas internas devolvieron 403 mientras tanto.
+# Esta metrica los capturo.
 resource "google_logging_metric" "autorizacion_denegada" {
   name   = "seguridad/autorizacion_denegada"
+  filter = <<-EOT
+    resource.type="cloud_run_revision"
+    httpRequest.status=403
+  EOT
+
+  description = "Invocaciones rechazadas por IAM"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+
+    labels {
+      key         = "servicio"
+      value_type  = "STRING"
+      description = "Servicio que rechazo la llamada"
+    }
+  }
+
+  label_extractors = {
+    "servicio" = "EXTRACT(resource.labels.service_name)"
+  }
+
+  depends_on = [google_project_service.requeridas]
+}
+
+# ── 2. Actividad administrativa ─────────────────────────────────────────────
+# Los Cloud Audit Logs registran quien cambia la configuracion del proyecto.
+# Es la senal que responde a "¿quien toco esto?" despues de un incidente, y
+# la unica que no se puede reconstruir a posteriori si no se estaba recogiendo.
+resource "google_logging_metric" "actividad_administrativa" {
+  name   = "seguridad/actividad_administrativa"
+  filter = <<-EOT
+    logName:"cloudaudit.googleapis.com%2Factivity"
+    protoPayload.methodName!="google.logging.v2.ConfigServiceV2.CreateLogMetric"
+  EOT
+
+  description = "Cambios de configuracion sobre el proyecto, por identidad"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+
+    labels {
+      key         = "identidad"
+      value_type  = "STRING"
+      description = "Quien realizo el cambio"
+    }
+
+    labels {
+      key         = "metodo"
+      value_type  = "STRING"
+      description = "Operacion ejecutada"
+    }
+  }
+
+  label_extractors = {
+    "identidad" = "EXTRACT(protoPayload.authenticationInfo.principalEmail)"
+    "metodo"    = "EXTRACT(protoPayload.methodName)"
+  }
+
+  depends_on = [google_project_service.requeridas]
+}
+
+# ── 3. Reconocimiento ───────────────────────────────────────────────────────
+# Peticiones a rutas que no existen. Una aplicacion con clientes legitimos
+# produce muy pocas: los clientes conocen sus endpoints. Un volumen alto de
+# 404 es el patron clasico de alguien probando rutas a ver que encuentra
+# (/admin, /.env, /wp-login.php).
+resource "google_logging_metric" "reconocimiento" {
+  name   = "seguridad/reconocimiento"
+  filter = <<-EOT
+    resource.type="cloud_run_revision"
+    httpRequest.status=404
+  EOT
+
+  description = "Peticiones a rutas inexistentes"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+
+    labels {
+      key         = "ruta"
+      value_type  = "STRING"
+      description = "Ruta solicitada"
+    }
+  }
+
+  label_extractors = {
+    "ruta" = "EXTRACT(httpRequest.requestUrl)"
+  }
+
+  depends_on = [google_project_service.requeridas]
+}
+
+# ── 4. Volumen de salida ────────────────────────────────────────────────────
+# Bytes devueltos al cliente. Es el equivalente funcional del analisis de
+# exfiltracion sobre Flow Logs: lo que importa no es el trafico de red en
+# bruto sino cuanta informacion sale hacia fuera.
+#
+# El valor de la metrica son los BYTES, no el numero de peticiones: una
+# exfiltracion son pocas peticiones con mucho volumen, y contando peticiones
+# pasaria desapercibida.
+resource "google_logging_metric" "salida_bytes" {
+  name   = "seguridad/salida_bytes"
+  filter = <<-EOT
+    resource.type="cloud_run_revision"
+    httpRequest.responseSize>0
+  EOT
+
+  description = "Bytes devueltos a clientes externos"
+
+  # DISTRIBUTION y no INT64: Cloud Monitoring solo admite `value_extractor`
+  # sobre metricas de distribucion.
+  #
+  # La restriccion acaba siendo una mejora. Una distribucion permite preguntar
+  # algo mas fino que el volumen total: cual fue la respuesta MAS GRANDE. Y
+  # una exfiltracion es exactamente eso -pocas peticiones devolviendo mucho-,
+  # no un aumento suave del trafico agregado.
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "DISTRIBUTION"
+    unit        = "By"
+
+    labels {
+      key         = "servicio"
+      value_type  = "STRING"
+      description = "Servicio que respondio"
+    }
+  }
+
+  bucket_options {
+    exponential_buckets {
+      num_finite_buckets = 16
+      growth_factor      = 4
+      scale              = 100
+    }
+  }
+
+  value_extractor = "EXTRACT(httpRequest.responseSize)"
+
+  label_extractors = {
+    "servicio" = "EXTRACT(resource.labels.service_name)"
+  }
+
+  depends_on = [google_project_service.requeridas]
+}
+
+# ════════════════════════════════════════════════════════════════════════════
+# Metricas de la malla
+#
+# Solo tienen sentido con el cluster levantado: miden los logs de acceso L7
+# que emiten los sidecars de Envoy. Desactivadas por defecto para no dejar
+# metricas sin datos en un proyecto donde el cluster no existe.
+# ════════════════════════════════════════════════════════════════════════════
+resource "google_logging_metric" "malla_autorizacion_denegada" {
+  count = var.desplegar_metricas_malla ? 1 : 0
+
+  name   = "seguridad/malla_autorizacion_denegada"
   filter = <<-EOT
     resource.type="k8s_container"
     jsonPayload.codigo="403"
@@ -52,32 +225,19 @@ resource "google_logging_metric" "autorizacion_denegada" {
       value_type  = "STRING"
       description = "Identidad SPIFFE del llamante rechazado"
     }
-
-    labels {
-      key         = "destino"
-      value_type  = "STRING"
-      description = "Servicio al que intentaba llegar"
-    }
   }
 
   label_extractors = {
-    # El principal SPIFFE llega como spiffe://cluster.local/ns/<ns>/sa/<sa>.
-    # Se guarda entero: saber que CUENTA DE SERVICIO fue rechazada es mas util
-    # que saber que Pod, porque el Pod es efimero y la identidad no.
-    "origen"  = "EXTRACT(jsonPayload.origen)"
-    "destino" = "EXTRACT(jsonPayload.destino)"
+    "origen" = "EXTRACT(jsonPayload.origen)"
   }
 
   depends_on = [google_project_service.requeridas]
 }
 
-# ── 2. Trafico interno sin cifrar ───────────────────────────────────────────
-# Con PeerAuthentication en STRICT esta metrica deberia quedarse en cero
-# siempre. Precisamente por eso es util: cualquier valor distinto de cero
-# significa que alguien ha desplegado una excepcion, que un Pod no recibio
-# sidecar, o que hay una carga fuera de la malla hablando en claro.
-resource "google_logging_metric" "trafico_sin_mtls" {
-  name   = "seguridad/trafico_sin_mtls"
+resource "google_logging_metric" "malla_sin_mtls" {
+  count = var.desplegar_metricas_malla ? 1 : 0
+
+  name   = "seguridad/malla_trafico_sin_mtls"
   filter = <<-EOT
     resource.type="k8s_container"
     jsonPayload.origen=""
@@ -90,97 +250,6 @@ resource "google_logging_metric" "trafico_sin_mtls" {
     metric_kind = "DELTA"
     value_type  = "INT64"
     unit        = "1"
-
-    labels {
-      key         = "destino"
-      value_type  = "STRING"
-      description = "Servicio que acepto la conexion sin cifrar"
-    }
-  }
-
-  label_extractors = {
-    "destino" = "EXTRACT(jsonPayload.destino)"
-  }
-
-  depends_on = [google_project_service.requeridas]
-}
-
-# ── 3. Conexiones de red bloqueadas ─────────────────────────────────────────
-# Las reglas de firewall de terraform/gke tienen logging activado. Una regla
-# que deniega en silencio protege igual de bien, pero no genera la senal que
-# permite saber que alguien lo intento: la diferencia entre estar protegido y
-# saber que te estan probando.
-resource "google_logging_metric" "conexiones_bloqueadas" {
-  name   = "seguridad/conexiones_bloqueadas"
-  filter = <<-EOT
-    resource.type="gce_subnetwork"
-    log_id("compute.googleapis.com/firewall")
-    jsonPayload.disposition="DENIED"
-  EOT
-
-  description = "Conexiones rechazadas por reglas de firewall de la VPC"
-
-  metric_descriptor {
-    metric_kind = "DELTA"
-    value_type  = "INT64"
-    unit        = "1"
-
-    labels {
-      key         = "puerto"
-      value_type  = "STRING"
-      description = "Puerto de destino del intento"
-    }
-
-    labels {
-      key         = "direccion"
-      value_type  = "STRING"
-      description = "INGRESS o EGRESS"
-    }
-  }
-
-  label_extractors = {
-    "puerto"    = "EXTRACT(jsonPayload.connection.dest_port)"
-    "direccion" = "EXTRACT(jsonPayload.rule_details.direction)"
-  }
-
-  depends_on = [google_project_service.requeridas]
-}
-
-# ── 4. Volumen de salida hacia internet ─────────────────────────────────────
-# De los VPC Flow Logs. Se filtran los destinos externos porque el trafico
-# interno entre Pods es, por volumen, varios ordenes de magnitud mayor y
-# enterraria completamente la senal que interesa.
-resource "google_logging_metric" "salida_a_internet_bytes" {
-  name   = "seguridad/salida_a_internet_bytes"
-  filter = <<-EOT
-    resource.type="gce_subnetwork"
-    resource.labels.subnetwork_name="${var.subred_cluster}"
-    log_id("compute.googleapis.com/vpc_flows")
-    jsonPayload.dest_instance.vm_name=""
-    jsonPayload.reporter="SRC"
-  EOT
-
-  description = "Bytes enviados desde el cluster hacia destinos fuera de la VPC"
-
-  metric_descriptor {
-    metric_kind = "DELTA"
-    value_type  = "INT64"
-    unit        = "By"
-
-    labels {
-      key         = "pais_destino"
-      value_type  = "STRING"
-      description = "Pais del destino, segun la geolocalizacion del Flow Log"
-    }
-  }
-
-  # El valor de la metrica no es el numero de lineas sino los bytes que lleva
-  # cada una. Sin value_extractor se contarian conexiones, y una exfiltracion
-  # es precisamente pocas conexiones con mucho volumen.
-  value_extractor = "EXTRACT(jsonPayload.bytes_sent)"
-
-  label_extractors = {
-    "pais_destino" = "EXTRACT(jsonPayload.dest_location.country)"
   }
 
   depends_on = [google_project_service.requeridas]
@@ -190,42 +259,41 @@ resource "google_logging_metric" "salida_a_internet_bytes" {
 # Alertas de seguridad
 # ════════════════════════════════════════════════════════════════════════════
 
-resource "google_monitoring_alert_policy" "movimiento_lateral" {
-  display_name = "Seguridad — posible movimiento lateral"
+resource "google_monitoring_alert_policy" "autorizacion_denegada" {
+  display_name = "Seguridad — invocaciones rechazadas por IAM"
   combiner     = "OR"
 
   documentation {
-    subject   = "Varias peticiones rechazadas por politicas de autorizacion"
+    subject   = "Varias invocaciones rechazadas por falta de autorizacion"
     content   = <<-EOT
-      La malla ha rechazado mas de diez peticiones en cinco minutos por falta
-      de autorizacion (403, `RBAC: access denied`).
+      Se han rechazado mas de diez invocaciones en cinco minutos por falta de
+      autorizacion (403).
 
-      En reposo esta metrica vale **cero**: las rutas legitimas estan todas
-      permitidas de forma explicita en `k8s/41-istio-seguridad.yaml`. Un valor
-      sostenido distinto de cero solo admite dos lecturas, y conviene
-      descartarlas en este orden:
+      En reposo esta metrica vale **cero**: los servicios internos aceptan
+      unicamente a la cuenta de servicio del orquestador, y esa ruta esta
+      permitida de forma explicita. Un valor sostenido distinto de cero admite
+      tres lecturas, en este orden de probabilidad:
 
-      1. **Un despliegue nuevo con una ruta que nadie autorizo.** Es lo mas
-         probable y lo menos grave. Mira si ha habido un rollout reciente.
-      2. **Un Pod comprometido probando que mas alcanza.** Es el escenario
-         para el que se diseno la politica de denegacion por defecto.
+      1. **Un despliegue reciente todavia propagando permisos.** Los cambios de
+         IAM en Cloud Run tardan un par de minutos en surtir efecto, y durante
+         ese tiempo las llamadas internas fallan. Se observo exactamente esto
+         al desplegar el laboratorio.
+      2. **Una ruta nueva que nadie autorizo.** Mira si hay un servicio
+         recien anadido llamando a otro.
+      3. **Alguien intentando invocar un servicio interno desde fuera.** Es el
+         escenario para el que se protegieron los servicios con IAM en lugar
+         de dejarlos publicos.
 
-      El `origen` de la metrica trae la identidad SPIFFE del llamante
-      rechazado, que identifica la cuenta de servicio y no el Pod: util
-      porque el Pod es efimero y la identidad no.
-
-      ```
-      kubectl logs -n otel-lab -l app=<destino> -c istio-proxy | grep 'RBAC'
-      ```
+      La etiqueta `servicio` indica cual rechazo la llamada.
     EOT
     mime_type = "text/markdown"
   }
 
   conditions {
-    display_name = "Mas de 10 denegaciones en 5 minutos"
+    display_name = "Mas de 10 rechazos en 5 minutos"
 
     condition_threshold {
-      filter = "metric.type=\"logging.googleapis.com/user/seguridad/autorizacion_denegada\" AND resource.type=\"k8s_container\""
+      filter = "metric.type=\"logging.googleapis.com/user/seguridad/autorizacion_denegada\" AND resource.type=\"cloud_run_revision\""
 
       comparison      = "COMPARISON_GT"
       threshold_value = 10
@@ -235,12 +303,12 @@ resource "google_monitoring_alert_policy" "movimiento_lateral" {
         alignment_period     = "300s"
         per_series_aligner   = "ALIGN_SUM"
         cross_series_reducer = "REDUCE_SUM"
-        group_by_fields      = ["metric.label.origen"]
+        group_by_fields      = ["metric.label.servicio"]
       }
     }
   }
 
-  severity              = "CRITICAL"
+  severity              = "WARNING"
   notification_channels = [google_monitoring_notification_channel.correo.id]
 
   alert_strategy {
@@ -248,40 +316,38 @@ resource "google_monitoring_alert_policy" "movimiento_lateral" {
   }
 }
 
-resource "google_monitoring_alert_policy" "mtls_roto" {
-  display_name = "Seguridad — trafico interno sin cifrar"
+resource "google_monitoring_alert_policy" "reconocimiento" {
+  display_name = "Seguridad — sondeo de rutas inexistentes"
   combiner     = "OR"
 
   documentation {
-    subject   = "Hay trafico L7 sin identidad mTLS dentro de la malla"
+    subject   = "Volumen inusual de peticiones a rutas que no existen"
     content   = <<-EOT
-      Se ha observado trafico hacia un servicio de la malla sin certificado
-      mTLS en el llamante.
+      Mas de veinte peticiones a rutas inexistentes en cinco minutos.
 
-      Con `PeerAuthentication` en `STRICT` esto **no deberia poder ocurrir**,
-      asi que cualquier valor distinto de cero indica una de estas tres cosas:
+      Una aplicacion con clientes legitimos produce muy pocos 404: los
+      clientes conocen sus endpoints. Un volumen alto es el patron clasico de
+      alguien probando rutas a ver que encuentra.
 
-      | Causa | Como confirmarlo |
-      |---|---|
-      | Un Pod arranco sin sidecar | `kubectl get pods -n otel-lab` debe dar 2/2 en todos |
-      | Alguien desplego una excepcion `PERMISSIVE` | `kubectl get peerauthentication -A` |
-      | Una carga fuera de la malla llama al servicio | Revisa el `destino` de la metrica |
+      **Antes de escalar**, mira la etiqueta `ruta`. Si los caminos son del
+      tipo `/admin`, `/.env` o `/wp-login.php`, es un escaneo automatizado de
+      fondo y no va dirigido a este sistema en particular. Si en cambio son
+      variaciones de rutas reales de la API, alguien esta explorando a mano.
 
-      La primera es la mas comun: un Pod creado antes de etiquetar el
-      namespace no recibe sidecar, y ademas de hablar en claro queda fuera de
-      toda la telemetria de malla. Se arregla con `kubectl rollout restart`.
+      El umbral no es arbitrario: por debajo de el no se distingue de los
+      errores de integracion de un cliente mal configurado.
     EOT
     mime_type = "text/markdown"
   }
 
   conditions {
-    display_name = "Cualquier peticion sin mTLS"
+    display_name = "Mas de 20 rutas inexistentes en 5 minutos"
 
     condition_threshold {
-      filter = "metric.type=\"logging.googleapis.com/user/seguridad/trafico_sin_mtls\" AND resource.type=\"k8s_container\""
+      filter = "metric.type=\"logging.googleapis.com/user/seguridad/reconocimiento\" AND resource.type=\"cloud_run_revision\""
 
       comparison      = "COMPARISON_GT"
-      threshold_value = 0
+      threshold_value = 20
       duration        = "300s"
 
       aggregations {
@@ -304,50 +370,37 @@ resource "google_monitoring_alert_policy" "exfiltracion" {
   combiner     = "OR"
 
   documentation {
-    subject   = "El cluster esta enviando mas datos de lo habitual hacia internet"
+    subject   = "Los servicios estan devolviendo mas datos de lo habitual"
     content   = <<-EOT
-      La salida hacia destinos fuera de la VPC supera los
-      ${var.umbral_exfiltracion_mb} MB en diez minutos.
+      El percentil 99 del tamano de respuesta supera los
+      ${var.umbral_respuesta_maxima_kb} KB.
 
-      La salida legitima de este laboratorio son las exportaciones de
-      telemetria a Cloud Trace, Cloud Logging y Managed Prometheus, mas la
-      descarga ocasional de imagenes. Todo eso junto se queda muy por debajo
-      del umbral.
+      Las respuestas de esta API son objetos JSON de unos cientos de bytes, de
+      modo que alcanzar ese volumen requiere o un pico de trafico legitimo muy
+      por encima de lo normal, o respuestas mucho mayores de lo que ningun
+      endpoint deberia devolver.
 
-      **Antes de escalar**, comprueba la etiqueta `pais_destino`. Un volumen
-      alto hacia los rangos de Google es casi siempre telemetria o un pull de
-      imagenes; un volumen alto hacia un destino que no aparece nunca en la
-      linea base es otra cosa.
-
-      El filtro que devuelve los flujos crudos:
-
-      ```
-      resource.type="gce_subnetwork"
-      resource.labels.subnetwork_name="${var.subred_cluster}"
-      log_id("compute.googleapis.com/vpc_flows")
-      jsonPayload.dest_instance.vm_name=""
-      ```
-
-      Nota sobre el muestreo: los Flow Logs estan a `flow_sampling = 0.5`, asi
-      que el volumen real es aproximadamente el doble del observado. El umbral
-      ya lo tiene en cuenta.
+      Se vigila el TAMANO DE LA MAYOR RESPUESTA y no el volumen agregado, y la
+      diferencia importa: un pico de trafico legitimo multiplica el total pero
+      no cambia cuanto devuelve cada peticion. Una extraccion masiva de datos
+      si lo cambia, aunque sean cuatro peticiones y el total apenas se mueva.
     EOT
     mime_type = "text/markdown"
   }
 
   conditions {
-    display_name = "Salida por encima de ${var.umbral_exfiltracion_mb} MB / 10 min"
+    display_name = "Respuesta individual por encima de ${var.umbral_respuesta_maxima_kb} KB"
 
     condition_threshold {
-      filter = "metric.type=\"logging.googleapis.com/user/seguridad/salida_a_internet_bytes\" AND resource.type=\"gce_subnetwork\""
+      filter = "metric.type=\"logging.googleapis.com/user/seguridad/salida_bytes\" AND resource.type=\"cloud_run_revision\""
 
       comparison      = "COMPARISON_GT"
-      threshold_value = var.umbral_exfiltracion_mb * 1024 * 1024
+      threshold_value = var.umbral_respuesta_maxima_kb * 1024
       duration        = "600s"
 
       aggregations {
         alignment_period   = "600s"
-        per_series_aligner = "ALIGN_SUM"
+        per_series_aligner = "ALIGN_PERCENTILE_99"
       }
     }
   }
@@ -362,10 +415,6 @@ resource "google_monitoring_alert_policy" "exfiltracion" {
 
 # ════════════════════════════════════════════════════════════════════════════
 # Panel — Senales Doradas de Seguridad
-#
-# Cuatro filas, una por pregunta. El orden no es decorativo: va de lo externo
-# a lo interno, que es el recorrido que hace un atacante y tambien el que hace
-# quien investiga un incidente.
 # ════════════════════════════════════════════════════════════════════════════
 resource "google_monitoring_dashboard" "seguridad" {
   dashboard_json = jsonencode({
@@ -383,73 +432,18 @@ resource "google_monitoring_dashboard" "seguridad" {
                 "",
                 "Las cuatro senales doradas clasicas describen la **salud** del sistema.",
                 "Un sistema bajo intrusion puede tenerlas las cuatro en verde.",
-                "Este panel responde a las otras cuatro preguntas, de fuera hacia dentro:",
-                "quien intenta entrar, quien pide de mas, que viaja sin cifrar, que sale.",
+                "Este panel responde a las otras cuatro preguntas: a quien se le niega",
+                "el paso, quien cambia la plataforma, quien sondea, y cuanto sale.",
               ])
               format = "MARKDOWN"
             }
           }
         },
 
-        # ── Fila 1: perimetro ─────────────────────────────────────────────
         {
           width = 6, height = 4, xPos = 0, yPos = 1
           widget = {
-            title = "Conexiones bloqueadas por el firewall"
-            xyChart = {
-              dataSets = [{
-                timeSeriesQuery = {
-                  timeSeriesFilter = {
-                    filter = "metric.type=\"logging.googleapis.com/user/seguridad/conexiones_bloqueadas\""
-                    aggregation = {
-                      alignmentPeriod    = "300s"
-                      perSeriesAligner   = "ALIGN_SUM"
-                      crossSeriesReducer = "REDUCE_SUM"
-                      groupByFields      = ["metric.label.puerto"]
-                    }
-                  }
-                }
-                plotType = "STACKED_BAR"
-              }]
-              yAxis = { label = "intentos / 5 min", scale = "LINEAR" }
-            }
-          }
-        },
-        {
-          width = 6, height = 4, xPos = 6, yPos = 1
-          widget = {
-            title = "Salida hacia internet (bytes)"
-            xyChart = {
-              dataSets = [{
-                timeSeriesQuery = {
-                  timeSeriesFilter = {
-                    filter = "metric.type=\"logging.googleapis.com/user/seguridad/salida_a_internet_bytes\""
-                    aggregation = {
-                      alignmentPeriod    = "600s"
-                      perSeriesAligner   = "ALIGN_SUM"
-                      crossSeriesReducer = "REDUCE_SUM"
-                      groupByFields      = ["metric.label.pais_destino"]
-                    }
-                  }
-                }
-                plotType = "STACKED_AREA"
-              }]
-              thresholds = [{
-                value     = var.umbral_exfiltracion_mb * 1024 * 1024
-                color     = "RED"
-                direction = "ABOVE"
-                label     = "umbral de alerta"
-              }]
-              yAxis = { label = "bytes / 10 min", scale = "LINEAR" }
-            }
-          }
-        },
-
-        # ── Fila 2: dentro de la malla ────────────────────────────────────
-        {
-          width = 6, height = 4, xPos = 0, yPos = 5
-          widget = {
-            title = "Autorizacion denegada, por identidad del llamante"
+            title = "Invocaciones rechazadas por IAM"
             xyChart = {
               dataSets = [{
                 timeSeriesQuery = {
@@ -459,47 +453,93 @@ resource "google_monitoring_dashboard" "seguridad" {
                       alignmentPeriod    = "300s"
                       perSeriesAligner   = "ALIGN_SUM"
                       crossSeriesReducer = "REDUCE_SUM"
-                      groupByFields      = ["metric.label.origen"]
+                      groupByFields      = ["metric.label.servicio"]
                     }
                   }
                 }
                 plotType = "STACKED_BAR"
               }]
-              thresholds = [{
-                value     = 10
-                color     = "RED"
-                direction = "ABOVE"
-                label     = "umbral de movimiento lateral"
+              thresholds = [{ value = 10, label = "umbral de alerta" }]
+              yAxis      = { label = "403 / 5 min", scale = "LINEAR" }
+            }
+          }
+        },
+        {
+          width = 6, height = 4, xPos = 6, yPos = 1
+          widget = {
+            title = "Actividad administrativa, por identidad"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "metric.type=\"logging.googleapis.com/user/seguridad/actividad_administrativa\""
+                    aggregation = {
+                      alignmentPeriod    = "300s"
+                      perSeriesAligner   = "ALIGN_SUM"
+                      crossSeriesReducer = "REDUCE_SUM"
+                      groupByFields      = ["metric.label.identidad"]
+                    }
+                  }
+                }
+                plotType = "STACKED_BAR"
               }]
-              yAxis = { label = "403 / 5 min", scale = "LINEAR" }
+              yAxis = { label = "cambios / 5 min", scale = "LINEAR" }
+            }
+          }
+        },
+
+        {
+          width = 6, height = 4, xPos = 0, yPos = 5
+          widget = {
+            title = "Sondeo de rutas inexistentes"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "metric.type=\"logging.googleapis.com/user/seguridad/reconocimiento\""
+                    aggregation = {
+                      alignmentPeriod    = "300s"
+                      perSeriesAligner   = "ALIGN_SUM"
+                      crossSeriesReducer = "REDUCE_SUM"
+                      groupByFields      = ["metric.label.ruta"]
+                    }
+                  }
+                }
+                plotType = "STACKED_BAR"
+              }]
+              thresholds = [{ value = 20, label = "umbral de alerta" }]
+              yAxis      = { label = "404 / 5 min", scale = "LINEAR" }
             }
           }
         },
         {
           width = 6, height = 4, xPos = 6, yPos = 5
           widget = {
-            title = "Trafico interno sin mTLS (debe ser cero)"
+            title = "Tamano de respuesta (p99)"
             xyChart = {
               dataSets = [{
                 timeSeriesQuery = {
                   timeSeriesFilter = {
-                    filter = "metric.type=\"logging.googleapis.com/user/seguridad/trafico_sin_mtls\""
+                    filter = "metric.type=\"logging.googleapis.com/user/seguridad/salida_bytes\""
                     aggregation = {
-                      alignmentPeriod    = "300s"
-                      perSeriesAligner   = "ALIGN_SUM"
-                      crossSeriesReducer = "REDUCE_SUM"
-                      groupByFields      = ["metric.label.destino"]
+                      alignmentPeriod    = "600s"
+                      perSeriesAligner   = "ALIGN_PERCENTILE_99"
+                      crossSeriesReducer = "REDUCE_MAX"
+                      groupByFields      = ["metric.label.servicio"]
                     }
                   }
                 }
                 plotType = "LINE"
               }]
-              yAxis = { label = "peticiones / 5 min", scale = "LINEAR" }
+              thresholds = [{
+                value = var.umbral_respuesta_maxima_kb * 1024
+                label = "umbral de alerta"
+              }]
+              yAxis = { label = "bytes por respuesta", scale = "LINEAR" }
             }
           }
         },
 
-        # ── Fila 3: contexto ──────────────────────────────────────────────
         {
           width = 12, height = 1, xPos = 0, yPos = 9
           widget = {
@@ -507,12 +547,13 @@ resource "google_monitoring_dashboard" "seguridad" {
               content = join("\n", [
                 "### Como leer este panel",
                 "",
-                "- **Cero no es ausencia de datos.** Los dos paneles de la fila inferior",
+                "- **Cero no es ausencia de datos.** Los paneles de rechazos y sondeo",
                 "  valen cero cuando todo esta bien. Si llevan mucho tiempo planos,",
                 "  confirma que las metricas siguen recibiendo logs antes de confiar.",
-                "- **El muestreo de Flow Logs es 0,5**: el volumen real es el doble.",
                 "- **Un 403 no siempre es un ataque**: lo mas comun es un despliegue",
-                "  nuevo con una ruta que nadie autorizo. Mira primero los rollouts.",
+                "  reciente con los permisos todavia propagandose.",
+                "- **Se vigila el tamano de cada respuesta, no el volumen total.** Un",
+                "  pico de trafico legitimo no cambia cuanto devuelve cada peticion.",
               ])
               format = "MARKDOWN"
             }
