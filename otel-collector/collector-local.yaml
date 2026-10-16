@@ -173,6 +173,15 @@ exporters:
     endpoint: 0.0.0.0:8889
     send_timestamps: true
     metric_expiration: 5m
+    # Sin esto el exporter publica el formato clasico de Prometheus, que NO
+    # tiene sitio para exemplars: el trace_id que el SDK adjunta a cada punto
+    # del histograma se descarta en la salida. Con OpenMetrics activo, cada
+    # bucket puede llevar su `# {trace_id="..."}` y Prometheus lo almacena.
+    #
+    # Es la pieza que convierte una alerta de latencia en algo accionable:
+    # permite pasar de "el p99 subio" a "abre esta peticion concreta". La usan
+    # el pivot a trazas de Grafana y el enriquecimiento de aiops/detector.py.
+    enable_open_metrics: true
     # Convierte los resource attributes (service.name, deployment.environment)
     # en labels de Prometheus. Sin esto no se puede filtrar por servicio en el
     # dashboard ni correlacionar métricas con trazas.

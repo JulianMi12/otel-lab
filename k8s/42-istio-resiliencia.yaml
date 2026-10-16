@@ -1,0 +1,125 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Resiliencia L7 — timeouts, reintentos y circuit breaker
+#
+# Estos valores no son genericos: salen de los tres experimentos de caos del
+# laboratorio anterior.
+#
+#   E1 (latencia en service-b) mostro que un timeout de 5 s convertia una
+#   degradacion de 200 ms en un p99 de 7.475 ms, porque la llamada lenta se
+#   quedaba ocupando el worker hasta agotar el plazo. De ahi el timeout de 3 s
+#   hacia service-b: por debajo del plazo del borde, con sitio para un
+#   reintento completo.
+#
+#   E3 (fallos de la base) mostro que no hay reintento que arregle un error
+#   determinista. Por eso retryOn no incluye 5xx hacia data-service: solo
+#   reintenta fallos de conexion, que si son transitorios.
+#
+# La diferencia con la version de Cloud Run es que alli estos plazos estaban
+# escritos en el cliente HTTP de Python. Aqui se cambian sin reconstruir la
+# imagen, y el cambio queda versionado como manifiesto.
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: service-b-interno
+  namespace: otel-lab
+spec:
+  hosts:
+    - service-b.otel-lab.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: service-b.otel-lab.svc.cluster.local
+            port: { number: 8001 }
+      timeout: 3s
+      retries:
+        attempts: 2
+        perTryTimeout: 1s
+        retryOn: 5xx,reset,connect-failure
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: data-service-interno
+  namespace: otel-lab
+spec:
+  hosts:
+    - data-service.otel-lab.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: data-service.otel-lab.svc.cluster.local
+            port: { number: 8002 }
+      # data-service es una dependencia opcional (la analitica enriquece el
+      # pedido pero no lo bloquea). Un plazo corto es correcto justamente por
+      # eso: vale mas devolver el pedido sin analitica que retener al cliente.
+      timeout: 2s
+      retries:
+        attempts: 1
+        perTryTimeout: 1s
+        retryOn: reset,connect-failure
+---
+# DestinationRule de service-b: circuit breaker.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: service-b
+  namespace: otel-lab
+spec:
+  host: service-b.otel-lab.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 64
+        connectTimeout: 1s
+      http:
+        http2MaxRequests: 128
+        maxRequestsPerConnection: 0
+        # Si hay mas de 32 peticiones esperando conexion, la 33 se rechaza de
+        # inmediato con 503 en lugar de encolarse. Rechazar rapido es lo que
+        # impide que la cola crezca sin limite y el fallo se propague hacia
+        # arriba: es la contramedida directa al modo de fallo que destapo E1.
+        # El limite rige para HTTP/1.1, que es el protocolo que habla httpx
+        # entre los servicios; en HTTP/2 el multiplexado lo hace irrelevante.
+        http1MaxPendingRequests: 32
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 10s
+      baseEjectionTime: 30s
+      # Como maximo se expulsa la mitad de las instancias. Permitir el 100 %
+      # dejaria el servicio sin destinos y convertiria una degradacion parcial
+      # en una caida total.
+      maxEjectionPercent: 50
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: data-service
+  namespace: otel-lab
+spec:
+  host: data-service.otel-lab.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 32
+        connectTimeout: 1s
+      http:
+        http2MaxRequests: 64
+        http1MaxPendingRequests: 16
+    outlierDetection:
+      consecutive5xxErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: service-a
+  namespace: otel-lab
+spec:
+  host: service-a.otel-lab.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp: { maxConnections: 128, connectTimeout: 1s }
+      http: { http2MaxRequests: 256, http1MaxPendingRequests: 64 }

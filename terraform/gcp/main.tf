@@ -390,6 +390,185 @@ resource "google_cloud_run_v2_service" "service_b" {
 }
 
 # ════════════════════════════════════════════════════════════════════════════
+# Cloud Run — data-service (analitica, tercer microservicio)
+# ════════════════════════════════════════════════════════════════════════════
+resource "google_cloud_run_v2_service" "data_service" {
+  name     = "data-service"
+  location = var.region
+  labels   = var.labels
+
+  ingress = "INGRESS_TRAFFIC_ALL"
+
+  template {
+    service_account = google_service_account.runtime.email
+    labels          = var.labels
+
+    scaling {
+      min_instance_count = var.min_instances
+      max_instance_count = var.max_instances
+    }
+
+    dynamic "volumes" {
+      for_each = var.enable_cloud_sql ? [1] : []
+      content {
+        name = "cloudsql"
+        cloud_sql_instance {
+          instances = [google_sql_database_instance.postgres[0].connection_name]
+        }
+      }
+    }
+
+    volumes {
+      name = "collector-config"
+      secret {
+        secret = google_secret_manager_secret.collector_config.secret_id
+        items {
+          version = "latest"
+          path    = "collector-config.yaml"
+        }
+      }
+    }
+
+    containers {
+      name  = "app"
+      image = "${local.registry}/data-service:${var.app_version}"
+
+      depends_on = ["otel-collector"]
+
+      ports {
+        container_port = 8002
+      }
+
+      resources {
+        limits = {
+          cpu    = var.service_cpu
+          memory = var.service_memory
+        }
+
+        cpu_idle = false
+      }
+
+      dynamic "env" {
+        for_each = local.common_env
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
+      env {
+        name  = "OTEL_ENABLED"
+        value = "true"
+      }
+
+      env {
+        name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+        value = "http://localhost:4317"
+      }
+
+      env {
+        name  = "DB_NAME"
+        value = var.db_name
+      }
+
+      env {
+        name  = "DATABASE_URL"
+        value = var.enable_cloud_sql ? "postgresql://${var.db_user}:${var.db_password}@/${var.db_name}?host=/cloudsql/${google_sql_database_instance.postgres[0].connection_name}" : ""
+      }
+
+      env {
+        name  = "DATASTORE"
+        value = var.enable_cloud_sql ? "postgres" : "memoria"
+      }
+
+      # Inyeccion de fallos del Modulo D. En reposo ambas en cero; el
+      # experimento se activa cambiando la variable y reaplicando, sin tocar
+      # la imagen ni el codigo.
+      env {
+        name  = "CHAOS_LATENCY_MS"
+        value = tostring(var.chaos_latency_ms)
+      }
+
+      env {
+        name  = "CHAOS_ERROR_RATE"
+        value = tostring(var.chaos_error_rate)
+      }
+
+      dynamic "volume_mounts" {
+        for_each = var.enable_cloud_sql ? [1] : []
+        content {
+          name       = "cloudsql"
+          mount_path = "/cloudsql"
+        }
+      }
+
+      startup_probe {
+        http_get {
+          path = "/health"
+          port = 8002
+        }
+        initial_delay_seconds = 10
+        period_seconds        = 5
+        failure_threshold     = 10
+      }
+    }
+
+    containers {
+      name  = "otel-collector"
+      image = local.collector_image
+      args  = ["--config=/etc/otel/collector-config.yaml"]
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = var.collector_memory
+        }
+
+        cpu_idle = false
+      }
+
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
+
+      env {
+        name  = "ENVIRONMENT"
+        value = var.environment
+      }
+
+      volume_mounts {
+        name       = "collector-config"
+        mount_path = "/etc/otel"
+      }
+
+      startup_probe {
+        tcp_socket {
+          port = 4317
+        }
+        initial_delay_seconds = 3
+        period_seconds        = 3
+        failure_threshold     = 10
+        timeout_seconds       = 3
+      }
+    }
+  }
+
+  depends_on = [
+    google_project_iam_member.runtime_roles,
+    google_secret_manager_secret_version.collector_config,
+  ]
+}
+
+# service-a necesita permiso explicito para invocar data-service.
+resource "google_cloud_run_v2_service_iam_member" "a_invoca_data" {
+  location = google_cloud_run_v2_service.data_service.location
+  name     = google_cloud_run_v2_service.data_service.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.runtime.email}"
+}
+
+# ════════════════════════════════════════════════════════════════════════════
 # Cloud Run — service-a (punto de entrada publico)
 # ════════════════════════════════════════════════════════════════════════════
 resource "google_cloud_run_v2_service" "service_a" {
@@ -479,6 +658,11 @@ resource "google_cloud_run_v2_service" "service_a" {
       env {
         name  = "SERVICE_B_URL"
         value = google_cloud_run_v2_service.service_b.uri
+      }
+
+      env {
+        name  = "DATA_SERVICE_URL"
+        value = google_cloud_run_v2_service.data_service.uri
       }
 
       # Sin Cloud SQL la variable queda VACIA a proposito: el servicio detecta

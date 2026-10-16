@@ -1,0 +1,88 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Seguridad de la malla — mTLS estricto y autorizacion por identidad
+#
+# Esto es la mitad del Modulo C: antes de poder observar la seguridad de la
+# red hay que tener una postura que observar. Con PeerAuthentication en STRICT
+# todo el trafico entre Pods va cifrado y cada llamada lleva la identidad
+# SPIFFE del llamante, que es lo que luego aparece en los logs de acceso como
+# source_principal y alimenta el panel de señales doradas de seguridad.
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: mtls-estricto
+  namespace: otel-lab
+spec:
+  mtls:
+    mode: STRICT
+---
+# Denegar por defecto. Sin esta politica, STRICT solo garantiza que el trafico
+# va cifrado, no que el llamante tenga derecho a llamar: cualquier Pod con
+# sidecar del cluster podria invocar data-service. La regla vacia (sin `rules`)
+# es la forma canonica de un "deny all" en Istio.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: denegar-por-defecto
+  namespace: otel-lab
+spec:
+  {}
+---
+# service-a es el unico punto de entrada: acepta trafico del ingressgateway.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: permitir-entrada-a-service-a
+  namespace: otel-lab
+spec:
+  selector:
+    matchLabels: { app: service-a }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+---
+# service-b y data-service solo aceptan a service-a, y solo en los verbos y
+# rutas que realmente usa. Si un atacante tomara un Pod de service-b, no
+# podria pivotar hacia data-service: la malla rechaza la llamada en el Envoy
+# de destino, antes de que llegue al proceso.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: permitir-a-hacia-b
+  namespace: otel-lab
+spec:
+  selector:
+    matchLabels: { app: service-b }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/otel-lab/sa/service-a"]
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/inventory/*", "/health", "/"]
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: permitir-a-hacia-data
+  namespace: otel-lab
+spec:
+  selector:
+    matchLabels: { app: data-service }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/otel-lab/sa/service-a"]
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/data/*", "/health", "/", "/chaos/status"]

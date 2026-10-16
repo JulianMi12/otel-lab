@@ -1,0 +1,233 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Los tres microservicios dentro de la malla
+#
+# Observese lo que NO aparece en estos manifiestos: ninguna configuracion de
+# reintentos, ni de timeouts, ni de mTLS, ni de circuit breaker. Todo eso vive
+# en los manifiestos de Istio (40-, 41-, 42-). Esa separacion es el argumento
+# del Modulo A: la misma imagen que corre en Cloud Run y en ECS Fargate gana
+# politicas de resiliencia L7 solo por estar en la malla.
+#
+# Convencion de puertos: Istio deduce el protocolo del nombre del puerto. Un
+# puerto llamado "http" se inspecciona a L7 (rutas, codigos, reintentos); uno
+# sin nombre se trata como TCP opaco y la mitad de la telemetria se pierde.
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── service-a ───────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: service-a
+  namespace: otel-lab
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-a
+  namespace: otel-lab
+  labels: { app: service-a, service: service-a }
+spec:
+  selector: { app: service-a }
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: http-prom
+      port: 9464
+      targetPort: 9464
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-a
+  namespace: otel-lab
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: service-a }
+  template:
+    metadata:
+      labels:
+        app: service-a
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      serviceAccountName: service-a
+      containers:
+        - name: app
+          image: IMAGEN_SERVICE_A
+          ports:
+            - { containerPort: 8000, name: http }
+            - { containerPort: 9464, name: http-prom }
+          envFrom:
+            - configMapRef: { name: app-config }
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: service-a
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: db-credenciales, key: url } }
+            - name: DATASTORE
+              value: postgres
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            # Lo consume el SDK y acaba como k8s.pod.ip en el recurso, que es
+            # la clave con la que el procesador k8sattributes asocia la señal
+            # a su Pod.
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: k8s.pod.ip=$(POD_IP),k8s.pod.name=$(POD_NAME)
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 8
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 150m, memory: 192Mi }
+            limits:   { cpu: 600m, memory: 512Mi }
+---
+# ── service-b ───────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: service-b
+  namespace: otel-lab
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-b
+  namespace: otel-lab
+  labels: { app: service-b, service: service-b }
+spec:
+  selector: { app: service-b }
+  ports:
+    - { name: http, port: 8001, targetPort: 8001 }
+    - { name: http-prom, port: 9464, targetPort: 9464 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-b
+  namespace: otel-lab
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: service-b }
+  template:
+    metadata:
+      labels:
+        app: service-b
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      serviceAccountName: service-b
+      containers:
+        - name: app
+          image: IMAGEN_SERVICE_B
+          ports:
+            - { containerPort: 8001, name: http }
+            - { containerPort: 9464, name: http-prom }
+          envFrom:
+            - configMapRef: { name: app-config }
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: service-b
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: db-credenciales, key: url } }
+            - name: DATASTORE
+              value: postgres
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: k8s.pod.ip=$(POD_IP),k8s.pod.name=$(POD_NAME)
+          readinessProbe:
+            httpGet: { path: /health, port: 8001 }
+            initialDelaySeconds: 8
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8001 }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 150m, memory: 192Mi }
+            limits:   { cpu: 600m, memory: 512Mi }
+---
+# ── data-service ────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: data-service
+  namespace: otel-lab
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-service
+  namespace: otel-lab
+  labels: { app: data-service, service: data-service }
+spec:
+  selector: { app: data-service }
+  ports:
+    - { name: http, port: 8002, targetPort: 8002 }
+    - { name: http-prom, port: 9464, targetPort: 9464 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-service
+  namespace: otel-lab
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: data-service }
+  template:
+    metadata:
+      labels:
+        app: data-service
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      serviceAccountName: data-service
+      containers:
+        - name: app
+          image: IMAGEN_DATA_SERVICE
+          ports:
+            - { containerPort: 8002, name: http }
+            - { containerPort: 9464, name: http-prom }
+          envFrom:
+            - configMapRef: { name: app-config }
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: data-service
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: db-credenciales, key: url } }
+            - name: DATASTORE
+              value: postgres
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: k8s.pod.ip=$(POD_IP),k8s.pod.name=$(POD_NAME)
+          readinessProbe:
+            httpGet: { path: /health, port: 8002 }
+            initialDelaySeconds: 8
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 8002 }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 150m, memory: 192Mi }
+            limits:   { cpu: 600m, memory: 512Mi }

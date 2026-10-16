@@ -1,0 +1,4 @@
+# Copia a terraform.tfvars y ajusta.
+project_id    = "TU-PROYECTO-GCP"
+region        = "us-central1"
+email_alertas = "tu@correo.com"

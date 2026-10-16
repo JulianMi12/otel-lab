@@ -45,7 +45,7 @@ output "consola_cloudwatch_logs" {
 
 output "comandos_publicacion" {
   description = "Secuencia para construir y publicar las imágenes antes del apply"
-  value = <<-EOT
+  value       = <<-EOT
 
     1. Autenticar Docker contra ECR:
        aws ecr get-login-password --region ${var.region} | docker login --username AWS --password-stdin ${split("/", aws_ecr_repository.servicios["service-a"].repository_url)[0]}
@@ -62,4 +62,50 @@ output "comandos_publicacion" {
        aws ecs update-service --cluster ${aws_ecs_cluster.principal.name} --service service-a --force-new-deployment --region ${var.region}
 
   EOT
+}
+
+
+output "cuenta_destino" {
+  description = <<-EOT
+    Cuenta y usuario con los que se esta desplegando.
+    Conviene mirarlo antes de un apply: confirma que los recursos van a la
+    cuenta del laboratorio y no a otra configurada en el mismo equipo.
+  EOT
+  value = {
+    account_id = data.aws_caller_identity.actual.account_id
+    arn        = data.aws_caller_identity.actual.arn
+    perfil     = var.aws_profile
+    region     = var.region
+  }
+}
+
+# ── Modulo C: seguridad ─────────────────────────────────────────────────────
+output "flow_logs_log_group" {
+  description = "Grupo de CloudWatch Logs con los VPC Flow Logs de la VPC del laboratorio"
+  value       = aws_cloudwatch_log_group.flow_logs.name
+}
+
+output "consultas_de_red" {
+  description = "Consultas guardadas de Logs Insights para investigar trafico"
+  value = [
+    aws_cloudwatch_query_definition.quien_habla_con_quien.name,
+    aws_cloudwatch_query_definition.salida_por_destino.name,
+    aws_cloudwatch_query_definition.rechazos_por_puerto.name,
+    aws_cloudwatch_query_definition.logs_por_trace.name,
+  ]
+}
+
+output "topico_seguridad" {
+  description = "Topico SNS al que llegan las alarmas de seguridad"
+  value       = aws_sns_topic.seguridad.arn
+}
+
+output "recordatorio_apagado" {
+  description = "Servicios de pago por uso que hay que desactivar a mano al terminar"
+  value = var.habilitar_seguridad_avanzada ? join("\n", [
+    "GuardDuty y Security Hub quedan ACTIVOS y cobran por volumen.",
+    "Al terminar el laboratorio:",
+    "  aws securityhub disable-security-hub --profile ${var.aws_profile}",
+    "  aws guardduty delete-detector --detector-id <id> --profile ${var.aws_profile}",
+  ]) : "Seguridad avanzada desactivada: no hay nada que apagar a mano."
 }

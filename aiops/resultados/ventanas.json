@@ -1,0 +1,16 @@
+{
+  "escenario": "Modulo B - deteccion de anomalias",
+  "ventana": { "inicio": "2026-10-16T03:10:05", "fin": "2026-10-16T03:27:37" },
+  "fases": [
+    { "nombre": "baseline",     "inicio": "2026-10-16T03:10:05", "fin": "2026-10-16T03:17:09",
+      "esperado": "sin alertas" },
+    { "nombre": "ruido",        "inicio": "2026-10-16T03:17:09",      "fin": "2026-10-16T03:18:27",
+      "inyeccion": "latencia 700ms en service-b",
+      "esperado": "el umbral fijo dispara; la regla correlacionada no" },
+    { "nombre": "incidente",    "inicio": "2026-10-16T03:20:31",      "fin": "2026-10-16T03:23:33",
+      "inyeccion": "postgres detenido",
+      "esperado": "la regla correlacionada abre incidente con trace_id" },
+    { "nombre": "recuperacion", "inicio": "2026-10-16T03:23:33",         "fin": "2026-10-16T03:27:37",
+      "esperado": "el incidente se cierra sin intervencion" }
+  ]
+}

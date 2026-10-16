@@ -41,6 +41,7 @@ from common.telemetry import (
 # -----------------------------------------------------------------------------
 SERVICE_NAME = "service-a"
 SERVICE_B_URL = os.getenv("SERVICE_B_URL", "http://service-b:8001")
+DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://data-service:8002")
 DB_DSN = os.getenv("DATABASE_URL", "postgresql://app:secret@postgres:5432/appdb")
 SERVICE_B_TIMEOUT = float(os.getenv("SERVICE_B_TIMEOUT", "5.0"))
 
@@ -57,9 +58,19 @@ meter = tel.meter
 # Instrumentos de metricas - los 4 SLIs del dashboard
 # -----------------------------------------------------------------------------
 # SLI-1 Disponibilidad y SLI-3 Error rate se derivan de este contador por status.
+# El texto de `description` acaba como el HELP de Prometheus, y en
+# Prometheus el nombre de la metrica es GLOBAL: si dos servicios publican
+# `http_requests_total` con HELP distinto, la libreria cliente rechaza la
+# coleccion ENTERA con "has help X but should have Y" y el endpoint deja de
+# servir metricas. Se detecto exactamente eso en el laboratorio: la serie de
+# error_rate aparecia con huecos sin causa aparente.
+#
+# Por eso las descripciones de las metricas compartidas son IDENTICAS en los
+# tres servicios y no mencionan a ninguno: quien emite cada punto se sabe por
+# la etiqueta `service`, no por el texto de ayuda.
 http_requests_total = meter.create_counter(
     "http_requests_total",
-    description="Total de requests HTTP atendidos por service-a",
+    description="Total de requests HTTP atendidos",
     unit="1",
 )
 # SLI-2 Latencia: el histograma permite calcular p50/p95/p99 en Prometheus.
@@ -71,12 +82,17 @@ http_request_duration = meter.create_histogram(
 # SLI-4 Throughput se deriva por rate() sobre http_requests_total.
 db_query_duration = meter.create_histogram(
     "db_query_duration_seconds",
-    description="Latencia de las queries a PostgreSQL",
+    description="Latencia de las consultas a la base de datos",
     unit="s",
 )
 service_b_calls_total = meter.create_counter(
     "service_b_calls_total",
     description="Llamadas HTTP salientes hacia service-b por resultado",
+    unit="1",
+)
+data_service_calls_total = meter.create_counter(
+    "data_service_calls_total",
+    description="Llamadas HTTP salientes hacia data-service por resultado",
     unit="1",
 )
 active_requests = meter.create_up_down_counter(
@@ -233,8 +249,14 @@ async def get_order(order_id: str, request: Request):
                     extra={"order_id": order_id, "status": order["status"]},
                 )
 
-            # -- Paso 2: llamada downstream con propagacion de contexto -------
-            inventory = await _call_service_b(order["product"])
+            # -- Paso 2: llamadas downstream con propagacion de contexto ------
+            # Ambas se lanzan EN PARALELO con gather: son independientes entre
+            # si, de modo que encadenarlas sumaria sus latencias sin motivo. En
+            # la traza se ven como dos spans hermanos solapados, no en cascada.
+            inventory, analytics = await asyncio.gather(
+                _call_service_b(order["product"]),
+                _call_data_service(order["product"]),
+            )
 
             # -- Paso 3: logica de negocio ------------------------------------
             with tracer.start_as_current_span("order.compute_total") as calc_span:
@@ -244,6 +266,8 @@ async def get_order(order_id: str, request: Request):
                 calc_span.set_attribute("order.fulfillable", fulfillable)
 
             root_span.set_attribute("order.fulfillable", fulfillable)
+            if analytics and analytics.get("orders") is not None:
+                root_span.set_attribute("analytics.orders", analytics["orders"])
             orders_processed_total.add(
                 1, {"result": "fulfillable" if fulfillable else "backorder"}
             )
@@ -261,6 +285,7 @@ async def get_order(order_id: str, request: Request):
             return {
                 "order": order,
                 "inventory": inventory,
+                "analytics": analytics,
                 "total_amount": round(total, 2),
                 "fulfillable": fulfillable,
                 "trace_id": trace_id,
@@ -297,6 +322,17 @@ async def _token_identidad(audiencia):
     local, donde service-b no esta protegido.
     """
     global _token_cache
+
+    # En GKE el metadata server SI responde, pero el token no sirve de nada:
+    # dentro de la malla la identidad del llamante la establece el certificado
+    # mTLS que emite Istio, y es ese certificado -no la cabecera- lo que
+    # evaluan las AuthorizationPolicy. Pedirlo igualmente añadiria una llamada
+    # al metadata server por cada audiencia nueva sin ningun efecto.
+    # El destino de Cloud Run siempre es https://...run.app; el de la malla es
+    # http://<servicio>.<ns>.svc.cluster.local, asi que el esquema basta para
+    # distinguirlos.
+    if not audiencia.startswith("https://"):
+        return None
 
     ahora = time.time()
     entrada = _token_cache.get(audiencia)
@@ -383,6 +419,69 @@ async def _call_service_b(product):
                 extra={"product": product, "error": str(exc)},
             )
             return {"available": -1, "error": "service-b unavailable"}
+
+
+async def _call_data_service(product):
+    """
+    Consulta la analitica del producto en data-service.
+
+    Es una llamada NO CRITICA: si falla, el pedido se procesa igual y la
+    respuesta sale sin la seccion de analitica. Tratar una dependencia
+    secundaria como critica es justo lo que convierte un fallo parcial en una
+    caida total, que es la leccion del experimento de particion de red.
+    """
+    with tracer.start_as_current_span(
+        "call.data-service.analytics",
+        attributes={
+            "peer.service": "data-service",
+            "http.method": "GET",
+            "order.product": product,
+            "dependency.criticality": "optional",
+        },
+    ) as span:
+        data_service_calls_total.add(1, {"result": "attempt"})
+        try:
+            cabeceras = {}
+            token = await _token_identidad(DATA_SERVICE_URL)
+            if token:
+                cabeceras["Authorization"] = "Bearer " + token
+
+            async with httpx.AsyncClient(timeout=SERVICE_B_TIMEOUT) as client:
+                resp = await client.get(
+                    DATA_SERVICE_URL + "/data/analytics/" + product,
+                    headers=cabeceras,
+                )
+                resp.raise_for_status()
+                datos = resp.json()
+
+            data_service_calls_total.add(1, {"result": "success"})
+            span.set_attribute("http.status_code", resp.status_code)
+            span.set_attribute("analytics.orders", datos.get("orders", 0))
+            return datos
+
+        except httpx.HTTPStatusError as exc:
+            codigo = exc.response.status_code
+            # 404 significa que el producto no tiene ventas: es una respuesta
+            # legitima del negocio, no un fallo de la dependencia.
+            resultado = "sin_datos" if codigo == 404 else "http_error"
+            data_service_calls_total.add(1, {"result": resultado})
+            span.set_attribute("http.status_code", codigo)
+            if codigo != 404:
+                span_status_error(span, exc)
+                log.warning(
+                    "data-service respondio con error",
+                    extra={"product": product, "status_code": codigo},
+                )
+            return None
+
+        except httpx.RequestError as exc:
+            data_service_calls_total.add(1, {"result": "unavailable"})
+            span_status_error(span, exc)
+            log.warning(
+                "data-service inalcanzable; el pedido continua sin analitica",
+                extra={"product": product, "error": str(exc)},
+            )
+            return None
 
 
 @app.get("/fail")

@@ -1,0 +1,110 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Perfil de instalacion de Istio (open source)
+#
+# Se usa Istio open source y no Cloud Service Mesh por una razon concreta del
+# enunciado: el laboratorio debe correr en dos nubes. Istio instalado con
+# istioctl es identico en GKE y en EKS, asi que los manifiestos de 40- a 50-
+# valen en las dos; Cloud Service Mesh es gestionado por Google y no tiene
+# equivalente directo en AWS, lo que romperia la comparacion.
+#
+#   istioctl install -f k8s/istio/istio-operator.yaml -y
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: otel-lab-mesh
+spec:
+  profile: default
+
+  meshConfig:
+    enableTracing: true
+
+    defaultConfig:
+      tracing:
+        # El muestreo real lo fija el recurso Telemetry por namespace; este
+        # valor es solo el de respaldo para el trafico que no cae bajo
+        # ninguno de ellos.
+        sampling: 100.0
+      # Alinea el nombre del servicio de la malla con el que usa el SDK, de
+      # modo que en Cloud Trace los spans de Envoy y los de la aplicacion
+      # caen bajo el mismo servicio en lugar de aparecer como dos sistemas
+      # distintos que casualmente comparten trace_id.
+      proxyMetadata:
+        ISTIO_META_DNS_CAPTURE: "true"
+
+    # Envoy propaga W3C TraceContext, el mismo formato que usa el SDK de
+    # OpenTelemetry. Sin esta linea Istio usaria B3 y la cadena se cortaria
+    # en cada salto: dos trazas desconectadas en vez de una.
+    defaultProviders:
+      tracing:
+        - otel-collector
+      metrics:
+        - prometheus
+
+    extensionProviders:
+      # Trazas de los sidecars hacia el Collector del laboratorio.
+      - name: otel-collector
+        opentelemetry:
+          service: otel-collector.otel-lab.svc.cluster.local
+          port: 4317
+
+      # Logs de acceso L7 por OTLP. Van al mismo Collector que todo lo demas,
+      # de modo que atraviesan los mismos procesadores (k8sattributes,
+      # resource) y llegan a Cloud Logging con los mismos atributos que las
+      # trazas. Esa homogeneidad es lo que hace que la correlacion funcione.
+      - name: otel-access-log
+        envoyOtelAls:
+          service: otel-collector.otel-lab.svc.cluster.local
+          port: 4317
+          logFormat:
+            labels:
+              trace_id: "%REQ(TRACEPARENT)%"
+              metodo: "%REQ(:METHOD)%"
+              ruta: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+              codigo: "%RESPONSE_CODE%"
+              # Marca por que Envoy corto la peticion: UO = circuit breaker
+              # abierto, UH = sin destinos sanos, DC = el cliente se fue, UT =
+              # timeout. Es la diferencia entre "hay errores" y saber cual.
+              banderas: "%RESPONSE_FLAGS%"
+              duracion_ms: "%DURATION%"
+              origen: "%DOWNSTREAM_PEER_URI_SAN%"
+              destino: "%UPSTREAM_CLUSTER%"
+              bytes_recibidos: "%BYTES_RECEIVED%"
+              bytes_enviados: "%BYTES_SENT%"
+
+      - name: prometheus
+        prometheus: {}
+
+  components:
+    pilot:
+      k8s:
+        resources:
+          requests: { cpu: 300m, memory: 1Gi }
+          limits:   { cpu: "1",  memory: 2Gi }
+
+    ingressGateways:
+      - name: istio-ingressgateway
+        enabled: true
+        k8s:
+          service:
+            type: LoadBalancer
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: "1",  memory: 1Gi }
+          hpaSpec:
+            minReplicas: 1
+            maxReplicas: 2
+
+    egressGateways:
+      - name: istio-egressgateway
+        enabled: false
+
+  values:
+    global:
+      proxy:
+        resources:
+          requests: { cpu: 50m, memory: 128Mi }
+          limits:   { cpu: 500m, memory: 512Mi }
+    pilot:
+      autoscaleEnabled: false
+      autoscaleMin: 1

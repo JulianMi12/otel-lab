@@ -329,7 +329,24 @@ def setup_telemetry(service_name, instrument_db=True):
         from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
 
         # Psycopg2: un span por query SQL, con db.statement como atributo.
-        Psycopg2Instrumentor().instrument(tracer_provider=tracer_provider)
+        #
+        # skip_dep_check=True no es un atajo: es necesario. La instrumentacion
+        # exige la distribucion llamada "psycopg2", pero aqui se instala
+        # "psycopg2-binary", que es el mismo driver compilado. Sin esta
+        # bandera la comprobacion falla, la instrumentacion SE DESACTIVA EN
+        # SILENCIO y no aparece ni un solo span automatico de SQL, aunque el
+        # driver funcione perfectamente.
+        #
+        # El efecto secundario era peor que la ausencia de spans: el conflicto
+        # se registraba como un log cuyo cuerpo era un objeto DependencyConflict,
+        # y el exportador OTLP no sabe codificar un cuerpo que no sea primitivo:
+        #
+        #   Exception: Invalid type <class '...DependencyConflict'> of value ...
+        #
+        # Ese fallo tiraba el lote entero de logs en el que caia.
+        Psycopg2Instrumentor().instrument(
+            tracer_provider=tracer_provider, skip_dep_check=True
+        )
 
     tel.logger.info(
         "Telemetria inicializada",

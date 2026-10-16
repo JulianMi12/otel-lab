@@ -1,0 +1,50 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Despliegue completo del laboratorio en la malla
+#
+#   kubectl apply -k k8s/ --load-restrictor LoadRestrictionsNone
+#
+# El flag hace falta porque la configuracion del Collector se lee desde
+# otel-collector/, fuera de esta carpeta. Kustomize lo prohibe por defecto
+# para que un kustomization no pueda empaquetar archivos arbitrarios del
+# disco. Aqui la alternativa seria duplicar collector-gke.yaml dentro de k8s/,
+# y una copia que se desincroniza en silencio es peor riesgo que el que la
+# restriccion previene. scripts/desplegar-gke.sh ya lo pasa.
+#
+# 50-chaos-istio.yaml queda deliberadamente FUERA de esta lista: el caos se
+# aplica a mano durante la ventana del experimento y se retira despues. Si
+# estuviera aqui, un `apply -k` de rutina reintroduciria el fallo.
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: otel-lab
+
+resources:
+  - 00-namespace.yaml
+  - 10-postgres.yaml
+  - 20-otel-collector.yaml
+  - 30-servicios.yaml
+  - 40-istio-gateway.yaml
+  - 41-istio-seguridad.yaml
+  - 42-istio-resiliencia.yaml
+  - 43-istio-telemetria.yaml
+
+configMapGenerator:
+  # La configuracion del Collector se genera desde el mismo archivo que se
+  # versiona en otel-collector/, no desde una copia pegada aqui. Asi no puede
+  # existir la situacion de que el Collector del cluster y el del repositorio
+  # digan cosas distintas.
+  - name: otel-collector-config
+    files:
+      - collector-gke.yaml=../otel-collector/collector-gke.yaml
+
+generatorOptions:
+  # Sin sufijo de hash: el nombre del ConfigMap se referencia textualmente
+  # desde 20-otel-collector.yaml.
+  disableNameSuffixHash: true
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: otel-lab
+      app.kubernetes.io/managed-by: kustomize

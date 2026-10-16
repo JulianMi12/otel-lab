@@ -202,7 +202,11 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_DEFAULT_THEME: light
       GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Editor, no Viewer. El rol Viewer no da acceso a Explore, y la captura
+      # automatica de evidencias necesita consultas LogQL filtradas por
+      # trace_id, no solo los paneles fijos. Con Viewer, la URL de Explore
+      # redirige a la pagina de inicio y la evidencia sale inservible.
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
       # traceToMetrics y traceqlEditor habilitan los saltos entre señales
       # configurados en datasources.yaml.
       GF_FEATURE_TOGGLES_ENABLE: traceqlEditor traceToMetrics lokiStructuredMetadata
@@ -233,6 +237,7 @@ services:
       OTEL_ENABLED: "true"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       SERVICE_B_URL: http://service-b:8001
+      DATA_SERVICE_URL: http://data-service:8002
       DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
       PROMETHEUS_PORT: "9464"
       ENVIRONMENT: development
@@ -282,6 +287,50 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # ── data-service ─────────────────────────────────────────────────────────
+  # Tercer microservicio del laboratorio integrador. Ejecuta las consultas de
+  # agregacion y es el objetivo del experimento de caos del Modulo D.
+  data-service:
+    build:
+      context: ./services
+      dockerfile: data-service/Dockerfile
+    image: otel-lab/data-service:1.0.0
+    container_name: data-service
+    environment:
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
+      DB_NAME: appdb
+      PROMETHEUS_PORT: "9464"
+      ENVIRONMENT: development
+      CLOUD_PROVIDER: local
+      APP_VERSION: 1.0.0
+      # Caos desactivado por defecto. El experimento del Modulo D lo activa
+      # con: CHAOS_ERROR_RATE=0.1 docker compose up -d data-service
+      # Sustitucion de variables, no valores literales. Con "0" fijo, el
+      # comando de arriba no tiene ningun efecto: Compose escribe el cero del
+      # archivo y la variable del shell se ignora. El experimento E4 fallo
+      # exactamente asi, y solo se detecto porque el script comprueba que la
+      # inyeccion produjo errores antes de evaluar la hipotesis.
+      CHAOS_LATENCY_MS: "${CHAOS_LATENCY_MS:-0}"
+      CHAOS_ERROR_RATE: "${CHAOS_ERROR_RATE:-0}"
+    ports:
+      - "8002:8002"
+      - "9466:9464"
+    networks: [otel-net]
+    <<: *service-limits
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8002/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6

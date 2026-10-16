@@ -29,12 +29,17 @@ terraform {
 }
 
 provider "aws" {
-  region = var.region
+  region  = var.region
+  profile = var.aws_profile
 
   default_tags {
     tags = var.tags
   }
 }
+
+# Identidad con la que se esta operando. Se expone como output para poder
+# confirmar, antes de aplicar nada, que los recursos van a la cuenta correcta.
+data "aws_caller_identity" "actual" {}
 
 data "aws_availability_zones" "disponibles" {
   state = "available"
@@ -183,12 +188,22 @@ resource "aws_security_group" "tasks" {
     security_groups = [aws_security_group.alb.id]
   }
 
-  # service-b solo acepta trafico de otras tasks del mismo grupo: no es
-  # alcanzable desde el ALB ni desde internet.
+  # service-b y data-service solo aceptan trafico de otras tasks del mismo
+  # grupo: no son alcanzables desde el ALB ni desde internet. Solo service-a
+  # esta expuesto, que es el patron de un servicio de borde con dependencias
+  # internas.
   ingress {
     description = "service-b desde otras tasks"
     from_port   = 8001
     to_port     = 8001
+    protocol    = "tcp"
+    self        = true
+  }
+
+  ingress {
+    description = "data-service desde otras tasks"
+    from_port   = 8002
+    to_port     = 8002
     protocol    = "tcp"
     self        = true
   }
@@ -225,7 +240,7 @@ resource "aws_security_group" "rds" {
 # REGISTRO DE IMAGENES
 # ════════════════════════════════════════════════════════════════════════════
 resource "aws_ecr_repository" "servicios" {
-  for_each = toset(["service-a", "service-b"])
+  for_each = toset(["service-a", "service-b", "data-service"])
 
   name                 = "${local.nombre}/${each.value}"
   image_tag_mutability = "MUTABLE"
@@ -315,8 +330,8 @@ resource "aws_iam_role_policy_attachment" "tarea_cloudwatch" {
 # SECRETOS
 # ════════════════════════════════════════════════════════════════════════════
 resource "aws_secretsmanager_secret" "db_password" {
-  name                    = "${local.nombre}/db-password"
-  description             = "Password de PostgreSQL del laboratorio OTel"
+  name        = "${local.nombre}/db-password"
+  description = "Password de PostgreSQL del laboratorio OTel"
   # Sin ventana de recuperacion: permite recrear el laboratorio de inmediato
   # sin chocar con un secreto del mismo nombre en estado de borrado pendiente.
   recovery_window_in_days = 0
@@ -361,7 +376,7 @@ resource "aws_db_instance" "postgres" {
   deletion_protection = false
   publicly_accessible = false
 
-  backup_retention_period = 0
+  backup_retention_period      = 0
   performance_insights_enabled = false
 
   tags = { Name = "${local.nombre}-postgres" }
@@ -371,7 +386,7 @@ resource "aws_db_instance" "postgres" {
 # LOGS
 # ════════════════════════════════════════════════════════════════════════════
 resource "aws_cloudwatch_log_group" "servicios" {
-  for_each = toset(["service-a", "service-b"])
+  for_each = toset(["service-a", "service-b", "data-service"])
 
   name              = "/ecs/${local.nombre}/${each.value}"
   retention_in_days = var.log_retention_days
@@ -398,6 +413,25 @@ resource "aws_service_discovery_private_dns_namespace" "interno" {
   name        = "${local.nombre}.local"
   description = "Namespace interno del laboratorio OTel"
   vpc         = aws_vpc.principal.id
+}
+
+resource "aws_service_discovery_service" "data_service" {
+  name = "data-service"
+
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.interno.id
+
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+
+    routing_policy = "MULTIVALUE"
+  }
+
+  health_check_custom_config {
+    failure_threshold = 1
+  }
 }
 
 resource "aws_service_discovery_service" "service_b" {
@@ -534,6 +568,110 @@ resource "aws_ecs_task_definition" "service_b" {
   ])
 }
 
+# ── data-service: tercer microservicio del laboratorio integrador ──────────
+# Ejecuta las consultas analiticas y es el objetivo del experimento de caos
+# del Modulo D (error rate del 10 %).
+resource "aws_ecs_task_definition" "data_service" {
+  family                   = "${local.nombre}-data-service"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.ejecucion.arn
+  task_role_arn            = aws_iam_role.tarea.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "app"
+      image     = "${aws_ecr_repository.servicios["data-service"].repository_url}:${var.app_version}"
+      essential = true
+
+      portMappings = [{ containerPort = 8002, protocol = "tcp" }]
+
+      cpu    = var.app_cpu
+      memory = var.task_memory - var.collector_memory
+
+      environment = [
+        { name = "OTEL_ENABLED", value = "true" },
+        { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
+        { name = "DATABASE_URL", value = local.db_url },
+        { name = "DB_NAME", value = var.db_name },
+        { name = "ENVIRONMENT", value = var.environment },
+        { name = "CLOUD_PROVIDER", value = "aws" },
+        { name = "APP_VERSION", value = var.app_version },
+        # Inyeccion de fallos del Modulo D. En reposo ambas van a cero; el
+        # experimento se activa cambiando chaos_error_rate y forzando un
+        # nuevo despliegue, sin tocar la imagen.
+        { name = "CHAOS_LATENCY_MS", value = tostring(var.chaos_latency_ms) },
+        { name = "CHAOS_ERROR_RATE", value = tostring(var.chaos_error_rate) },
+      ]
+
+      dependsOn = [{ containerName = "otel-collector", condition = "START" }]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.servicios["data-service"].name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "app"
+        }
+      }
+
+      healthCheck = {
+        command     = ["CMD-SHELL", "curl -f http://localhost:8002/health || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 60
+      }
+    },
+    {
+      name      = "otel-collector"
+      image     = local.collector_image
+      essential = true
+
+      cpu    = var.collector_cpu
+      memory = var.collector_memory
+
+      environment = [
+        { name = "AWS_REGION", value = var.region },
+        { name = "ENVIRONMENT", value = var.environment },
+        { name = "OTEL_SERVICE_NAME", value = "data-service" },
+        { name = "AOT_CONFIG_CONTENT", value = local.collector_config },
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.servicios["data-service"].name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "collector"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_service" "data_service" {
+  name            = "data-service"
+  cluster         = aws_ecs_cluster.principal.id
+  task_definition = aws_ecs_task_definition.data_service.arn
+  desired_count   = var.desired_count
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = local.subredes_tasks
+    security_groups  = [aws_security_group.tasks.id]
+    assign_public_ip = !var.use_nat_gateway
+  }
+
+  service_registries {
+    registry_arn = aws_service_discovery_service.data_service.arn
+  }
+
+  enable_execute_command = true
+}
+
 resource "aws_ecs_task_definition" "service_a" {
   family                   = "${local.nombre}-service-a"
   requires_compatibilities = ["FARGATE"]
@@ -559,6 +697,7 @@ resource "aws_ecs_task_definition" "service_a" {
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
         # Nombre DNS de Cloud Map: estable entre despliegues.
         { name = "SERVICE_B_URL", value = "http://service-b.${aws_service_discovery_private_dns_namespace.interno.name}:8001" },
+        { name = "DATA_SERVICE_URL", value = "http://data-service.${aws_service_discovery_private_dns_namespace.interno.name}:8002" },
         { name = "DATABASE_URL", value = local.db_url },
         { name = "ENVIRONMENT", value = var.environment },
         { name = "CLOUD_PROVIDER", value = "aws" },

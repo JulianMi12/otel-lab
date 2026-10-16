@@ -29,6 +29,7 @@ Thumbs.db
 
 # El reporte se regenera desde docs/generar_reporte.py; el HTML es intermedio
 docs/reporte-tecnico.html
+docs/reporte-integrador.html
 
 # Artefactos generados por el hook de revision de codigo
 PR_DETAILS_*.md

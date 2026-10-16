@@ -2,6 +2,19 @@
 # Variables del despliegue en AWS (ECS Fargate)
 # ════════════════════════════════════════════════════════════════════════════
 
+variable "aws_profile" {
+  description = <<-EOT
+    Perfil del AWS CLI con el que se despliega.
+
+    Se exige explicitamente y SIN valor por defecto a proposito. Si se dejara
+    vacio, Terraform usaria el perfil "default", que en un equipo de trabajo
+    suele ser la cuenta de la empresa: un `apply` descuidado crearia VPC, ECS
+    y RDS en infraestructura corporativa. Obligar a nombrarlo convierte ese
+    error silencioso en un fallo inmediato de `terraform plan`.
+  EOT
+  type        = string
+}
+
 variable "region" {
   description = "Region de AWS donde se despliega el laboratorio"
   type        = string
@@ -141,4 +154,64 @@ variable "tags" {
     Curso      = "observabilidad"
     Gestionado = "terraform"
   }
+}
+
+
+# ── Chaos Engineering (Modulo D) ────────────────────────────────────────────
+# Se exponen como variables de Terraform, y no como cambios de codigo, para
+# que el experimento sea reproducible y quede registrado en el estado: se
+# puede ver cuando se activo el caos y con que valores.
+variable "chaos_latency_ms" {
+  description = "Latencia artificial en data-service, en ms. 0 lo desactiva"
+  type        = number
+  default     = 0
+}
+
+variable "chaos_error_rate" {
+  description = <<-EOT
+    Proporcion de peticiones que data-service fallara deliberadamente (0 a 1).
+    El Modulo D pide 0.1, es decir un 10 %. En reposo debe quedar en 0.
+  EOT
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.chaos_error_rate >= 0 && var.chaos_error_rate <= 1
+    error_message = "chaos_error_rate debe estar entre 0 y 1."
+  }
+}
+
+# ── Modulo C: seguridad ─────────────────────────────────────────────────────
+variable "email_alertas" {
+  description = <<-EOT
+    Direccion suscrita al topico SNS de seguridad. Cadena vacia desactiva la
+    suscripcion.
+    AWS envia un correo de confirmacion y la suscripcion queda "pending" hasta
+    que alguien pulsa el enlace: un apply limpio NO garantiza que las alarmas
+    lleguen a ninguna parte.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "umbral_exfiltracion_mb" {
+  description = <<-EOT
+    Volumen de salida, en MB por periodo de cinco minutos, que dispara la
+    alarma. Lo que importa no es el numero sino que exista una linea base
+    contra la que comparar.
+  EOT
+  type        = number
+  default     = 50
+}
+
+variable "habilitar_seguridad_avanzada" {
+  description = <<-EOT
+    Activa GuardDuty y Security Hub.
+    Son los unicos servicios de seguridad.tf cuyo coste crece con el uso y no
+    con el tiempo: GuardDuty cobra por volumen analizado y Security Hub por
+    comprobacion ejecutada. Treinta dias de prueba gratuita cubren la
+    demostracion, pero hay que acordarse de apagarlos despues.
+  EOT
+  type        = bool
+  default     = false
 }

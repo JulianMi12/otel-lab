@@ -140,3 +140,25 @@ variable "labels" {
     gestionado = "terraform"
   }
 }
+
+
+# ── Chaos Engineering (Modulo D) ────────────────────────────────────────────
+variable "chaos_latency_ms" {
+  description = "Latencia artificial en data-service, en ms. 0 lo desactiva"
+  type        = number
+  default     = 0
+}
+
+variable "chaos_error_rate" {
+  description = <<-EOT
+    Proporcion de peticiones que data-service fallara deliberadamente (0 a 1).
+    El Modulo D pide 0.1, es decir un 10 %. En reposo debe quedar en 0.
+  EOT
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.chaos_error_rate >= 0 && var.chaos_error_rate <= 1
+    error_message = "chaos_error_rate debe estar entre 0 y 1."
+  }
+}

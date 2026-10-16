@@ -47,9 +47,19 @@ meter = tel.meter
 # -----------------------------------------------------------------------------
 # Instrumentos de metricas
 # -----------------------------------------------------------------------------
+# El texto de `description` acaba como el HELP de Prometheus, y en
+# Prometheus el nombre de la metrica es GLOBAL: si dos servicios publican
+# `http_requests_total` con HELP distinto, la libreria cliente rechaza la
+# coleccion ENTERA con "has help X but should have Y" y el endpoint deja de
+# servir metricas. Se detecto exactamente eso en el laboratorio: la serie de
+# error_rate aparecia con huecos sin causa aparente.
+#
+# Por eso las descripciones de las metricas compartidas son IDENTICAS en los
+# tres servicios y no mencionan a ninguno: quien emite cada punto se sabe por
+# la etiqueta `service`, no por el texto de ayuda.
 http_requests_total = meter.create_counter(
     "http_requests_total",
-    description="Total de requests HTTP atendidos por service-b",
+    description="Total de requests HTTP atendidos",
     unit="1",
 )
 http_request_duration = meter.create_histogram(
@@ -59,7 +69,7 @@ http_request_duration = meter.create_histogram(
 )
 db_query_duration = meter.create_histogram(
     "db_query_duration_seconds",
-    description="Latencia de las queries a PostgreSQL",
+    description="Latencia de las consultas a la base de datos",
     unit="s",
 )
 inventory_lookups_total = meter.create_counter(

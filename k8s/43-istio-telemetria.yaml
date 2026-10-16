@@ -1,0 +1,77 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Telemetria de la malla
+#
+# El punto que demuestra el Modulo A: estas tres señales salen de los sidecars
+# Envoy, no del codigo. Si manana se añadiera un cuarto servicio escrito en
+# Go sin instrumentar, apareceria en el grafo, en las metricas y en los logs
+# de acceso desde el primer segundo.
+#
+# La correlacion se mantiene porque Envoy propaga el mismo traceparent W3C
+# que ya usa el SDK: el span del proxy y el de la aplicacion comparten
+# trace_id, y en Cloud Trace se ven anidados. La resta entre ambos es el coste
+# de red mas el encolado del proxy, un dato que la instrumentacion de
+# aplicacion por si sola no puede dar.
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: trazas-malla
+  namespace: otel-lab
+spec:
+  tracing:
+    - providers:
+        - name: otel-collector
+      # 100 % en el laboratorio porque el volumen es bajo y perder trazas
+      # arruinaria la demostracion de correlacion. En produccion esto seria
+      # un muestreo adaptativo; el valor queda aqui, no en el codigo, que es
+      # justamente lo que permite bajarlo sin desplegar nada.
+      randomSamplingPercentage: 100.0
+      customTags:
+        mesh.source_workload:
+          environment: { name: ISTIO_META_WORKLOAD_NAME }
+        deployment.environment:
+          literal: { value: production }
+---
+# Logs de acceso L7 hacia el Collector. Alimentan el panel de seguridad del
+# Modulo C: cada linea trae el codigo de respuesta, la identidad mTLS del
+# llamante y el trace_id, de modo que un 403 se puede abrir hasta la traza
+# que lo provoco.
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: logs-acceso
+  namespace: otel-lab
+spec:
+  accessLogging:
+    - providers:
+        - name: otel-access-log
+---
+# Dimensiones extra en las metricas de la malla. Sin source_principal no se
+# puede responder "quien llamo"; sin response_flags no se distingue un 503 por
+# circuit breaker abierto (UO) de uno por falta de destinos sanos (UH) ni de
+# uno que devolvio realmente la aplicacion. Esa distincion es la que convierte
+# una alerta de error_rate en un diagnostico.
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: metricas-malla
+  namespace: otel-lab
+spec:
+  metrics:
+    - providers:
+        - name: prometheus
+      overrides:
+        - match:
+            metric: REQUEST_COUNT
+            mode: CLIENT_AND_SERVER
+          tagOverrides:
+            source_principal:
+              value: "source.principal"
+            response_flags:
+              value: "response.flags"
+        - match:
+            metric: REQUEST_DURATION
+            mode: CLIENT_AND_SERVER
+          tagOverrides:
+            response_flags:
+              value: "response.flags"

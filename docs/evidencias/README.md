@@ -2,7 +2,7 @@
 
 Capturas generadas automáticamente por `scripts/capturar-evidencias.sh`.
 
-**trace_id de referencia:** `328dc87990f503cdf2166cf39f916b8c`
+**trace_id de referencia:** `0eed9d6441312ddfa7c3dac22f236446`
 
 | Archivo | Qué demuestra |
 |---|---|

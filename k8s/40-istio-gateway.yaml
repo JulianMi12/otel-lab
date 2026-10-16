@@ -1,0 +1,62 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Entrada a la malla — Gateway + VirtualService
+#
+# El Gateway describe el puerto que abre el ingressgateway; el VirtualService
+# describe que hacer con lo que entra por el. Separarlos permite que varios
+# equipos publiquen rutas distintas sobre un mismo punto de entrada sin
+# pisarse, que es la razon por la que Istio no los fusiona en un solo objeto.
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: otel-lab-gateway
+  namespace: otel-lab
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: service-a
+  namespace: otel-lab
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - otel-lab-gateway
+  http:
+    # /health se enruta aparte y sin reintentos: una sonda de salud que se
+    # reintenta deja de ser una sonda de salud, porque oculta justo el primer
+    # fallo que deberia detectar.
+    - name: salud
+      match:
+        - uri: { exact: /health }
+      route:
+        - destination:
+            host: service-a.otel-lab.svc.cluster.local
+            port: { number: 8000 }
+      timeout: 2s
+
+    - name: aplicacion
+      route:
+        - destination:
+            host: service-a.otel-lab.svc.cluster.local
+            port: { number: 8000 }
+      # 10s en el borde contra 5s en la llamada interna a service-b. El margen
+      # es deliberado: si el timeout del borde fuera igual o menor, el cliente
+      # veria un 504 del gateway antes de que la traza interna registrase su
+      # propio fallo, y el diagnostico se quedaria sin la causa raiz. Este
+      # fue exactamente el modo de fallo que destapo el experimento E1.
+      timeout: 10s
+      retries:
+        attempts: 2
+        perTryTimeout: 4s
+        retryOn: 5xx,reset,connect-failure,refused-stream

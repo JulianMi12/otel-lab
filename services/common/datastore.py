@@ -75,6 +75,15 @@ class AlmacenMemoria:
     tipo = "memoria"
     db_system = "memory"
 
+    # Se declara la misma consulta que el backend SQL para que el span lleve
+    # un `db.statement` equivalente con cualquiera de los dos backends.
+    SQL_ANALITICA = (
+        "SELECT product, COUNT(*), SUM(quantity), SUM(quantity * unit_price), "
+        "AVG(quantity * unit_price), "
+        "COUNT(*) FILTER (WHERE status = 'delivered') "
+        "FROM orders WHERE product = ? GROUP BY product"
+    )
+
     def __init__(self):
         self._lock = threading.Lock()
         self._pedidos = _pedidos_semilla()
@@ -124,6 +133,44 @@ class AlmacenMemoria:
             i["reserved"] += cantidad
             return (i["available"], i["reserved"])
 
+    # -- Consultas analiticas (las consume data-service) --------------------
+
+    def listar_productos(self, limite=50):
+        """Catalogo con el stock agregado de cada producto."""
+        with self._lock:
+            return [
+                (p["product"], p["available"], p["reserved"], p["warehouse"])
+                for p in list(self._inventario.values())[:limite]
+            ]
+
+    def analitica_producto(self, producto_id):
+        """
+        Agrega los pedidos de un producto: unidades, importe y ticket medio.
+
+        Es el equivalente en memoria de un SELECT con GROUP BY, calculado
+        sobre los mismos datos semilla, de modo que el resultado coincide con
+        el del backend PostgreSQL.
+        """
+        with self._lock:
+            pedidos = [
+                p for p in self._pedidos.values() if p["product"] == producto_id
+            ]
+            if not pedidos:
+                return None
+
+            unidades = sum(p["quantity"] for p in pedidos)
+            importe = sum(p["quantity"] * p["unit_price"] for p in pedidos)
+            entregados = sum(1 for p in pedidos if p["status"] == "delivered")
+
+            return (
+                producto_id,
+                len(pedidos),
+                unidades,
+                round(importe, 2),
+                round(importe / len(pedidos), 2),
+                entregados,
+            )
+
     def cerrar(self):
         pass
 
@@ -142,6 +189,18 @@ class AlmacenPostgres:
 
     tipo = "postgres"
     db_system = "postgresql"
+
+    # Texto de la consulta analitica, que data-service publica como atributo
+    # `db.statement` del span siguiendo las DB Semantic Conventions. El
+    # parametro NO se interpola aqui: viaja como marcador y lo sustituye el
+    # driver, de modo que el atributo de la traza nunca lleva datos de usuario.
+    SQL_ANALITICA = (
+        "SELECT product, COUNT(*) AS pedidos, SUM(quantity) AS unidades, "
+        "SUM(quantity * unit_price) AS importe, "
+        "AVG(quantity * unit_price) AS ticket_medio, "
+        "COUNT(*) FILTER (WHERE status = 'delivered') AS entregados "
+        "FROM orders WHERE product = %s GROUP BY product"
+    )
 
     def __init__(self, dsn, minconn=2, maxconn=20):
         from psycopg2.pool import ThreadedConnectionPool
@@ -205,6 +264,39 @@ class AlmacenPostgres:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            self._pool.putconn(conn)
+
+    # -- Consultas analiticas (las consume data-service) --------------------
+
+    def listar_productos(self, limite=50):
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT product, available, reserved, warehouse "
+                    "FROM inventory ORDER BY product LIMIT %s",
+                    (limite,),
+                )
+                return cur.fetchall()
+        finally:
+            self._pool.putconn(conn)
+
+    def analitica_producto(self, producto_id):
+        """Agregacion sobre los pedidos de un producto."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(self.SQL_ANALITICA, (producto_id,))
+                fila = cur.fetchone()
+            if not fila:
+                return None
+            # NUMERIC llega como Decimal; se normaliza a float para que la
+            # respuesta JSON sea identica con ambos backends.
+            return (
+                fila[0], int(fila[1]), int(fila[2]),
+                round(float(fila[3]), 2), round(float(fila[4]), 2), int(fila[5]),
+            )
         finally:
             self._pool.putconn(conn)
 

@@ -1,0 +1,55 @@
+{
+  "generado": "2026-10-16T03:36:58.816718+00:00",
+  "ventana": {
+    "inicio": "2026-10-16T03:10:05+00:00",
+    "fin": "2026-10-16T03:27:37+00:00"
+  },
+  "parametros": {
+    "ventana_baseline": 20,
+    "sigmas": 2.0,
+    "dwell": 3,
+    "separacion": 12,
+    "paso_s": 15,
+    "robusto": false,
+    "slo": {
+      "disponibilidad_pct": 99.5,
+      "latencia_p99_ms": 1000.0,
+      "latencia_p95_ms": 500.0
+    }
+  },
+  "incidentes": [
+    {
+      "inicio": "2026-10-16T03:21:05+00:00",
+      "fin": "2026-10-16T03:24:05+00:00",
+      "duracion_s": 180.0,
+      "latencia_p99_pico_ms": 4575.0,
+      "latencia_p99_baseline_ms": 474.9,
+      "error_rate_pico_pct": 100.0,
+      "error_rate_baseline_pct": 0.0,
+      "senales": [
+        "latencia_p99",
+        "error_rate"
+      ],
+      "trace_id": "744735a7d612b133cf1c68614e27fe08",
+      "severidad": "critica"
+    }
+  ],
+  "comparacion": {
+    "umbral_estricto_500ms": {
+      "alertas": 2,
+      "coinciden_con_incidente": 1,
+      "sin_accion_asociada": 1
+    },
+    "umbral_laxo_2000ms": {
+      "alertas": 2,
+      "coinciden_con_incidente": 1,
+      "sin_accion_asociada": 1,
+      "incidentes_no_detectados": 0
+    },
+    "regla_correlacionada": {
+      "incidentes": 1,
+      "con_trace_id": 1
+    },
+    "reduccion_de_ruido_pct": 50.0
+  }
+}

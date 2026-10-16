@@ -1,0 +1,115 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Modulo D — inyeccion de fallos en la malla
+#
+# ESTE ARCHIVO NO SE APLICA CON `kubectl apply -k k8s/`. Se aplica a mano,
+# durante la ventana del experimento, y se retira con `kubectl delete -f`.
+#
+# Por que a nivel de malla y no de aplicacion, si data-service ya trae
+# CHAOS_LATENCY_MS y CHAOS_ERROR_RATE: porque son dos experimentos distintos
+# que responden a dos preguntas distintas.
+#
+#   Caos en la aplicacion  -> "¿que pasa si el proceso se degrada?"
+#                             Prueba el codigo: timeouts del cliente HTTP,
+#                             manejo de excepciones, degradacion elegante.
+#
+#   Caos en la malla       -> "¿que pasa si la RED entre dos servicios se
+#                             degrada?" Prueba la infraestructura: el fallo
+#                             ocurre en el Envoy, el proceso de destino ni se
+#                             entera. Es el unico de los dos que puede
+#                             reproducir una particion de red sin tocar el
+#                             kernel, que es precisamente lo que no se pudo
+#                             hacer en WSL2 por falta del modulo sch_netem.
+#
+# La ventaja operativa es el radio de impacto: el `match` limita el fallo al
+# trafico que trae la cabecera x-chaos, de modo que el experimento se puede
+# correr contra un cluster con trafico real sin afectar a nadie mas.
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── E1-mesh: 200 ms de latencia hacia service-b ─────────────────────────────
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: caos-latencia-service-b
+  namespace: otel-lab
+  annotations:
+    chaos.otel-lab/experimento: E1-latencia-service-b
+    chaos.otel-lab/hipotesis: >-
+      Con 200 ms añadidos en service-b, el p99 de /orders se mantiene por
+      debajo de 1.500 ms y el error_rate no supera el 1 %.
+spec:
+  hosts:
+    - service-b.otel-lab.svc.cluster.local
+  http:
+    - name: caos
+      match:
+        - headers:
+            x-chaos: { exact: "e1" }
+      fault:
+        delay:
+          percentage: { value: 100.0 }
+          fixedDelay: 200ms
+      route:
+        - destination:
+            host: service-b.otel-lab.svc.cluster.local
+            port: { number: 8001 }
+      timeout: 3s
+      retries:
+        attempts: 2
+        perTryTimeout: 1s
+        retryOn: 5xx,reset,connect-failure
+
+    # El trafico sin la cabecera conserva exactamente la ruta de
+    # 42-istio-resiliencia.yaml. Debe repetirse aqui porque un
+    # VirtualService sustituye por completo las reglas del host, no las
+    # complementa: omitir esta rama dejaria sin ruta al trafico normal.
+    - name: normal
+      route:
+        - destination:
+            host: service-b.otel-lab.svc.cluster.local
+            port: { number: 8001 }
+      timeout: 3s
+      retries:
+        attempts: 2
+        perTryTimeout: 1s
+        retryOn: 5xx,reset,connect-failure
+---
+# ── E2-mesh: 10 % de errores en data-service ────────────────────────────────
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: caos-errores-data-service
+  namespace: otel-lab
+  annotations:
+    chaos.otel-lab/experimento: E2-errores-data-service
+    chaos.otel-lab/hipotesis: >-
+      Con un 10 % de 503 en data-service, /orders sigue respondiendo 200
+      porque la analitica es una dependencia opcional; solo se degrada el
+      contenido de la respuesta, no su disponibilidad.
+spec:
+  hosts:
+    - data-service.otel-lab.svc.cluster.local
+  http:
+    - name: caos
+      match:
+        - headers:
+            x-chaos: { exact: "e2" }
+      fault:
+        abort:
+          percentage: { value: 10.0 }
+          httpStatus: 503
+      route:
+        - destination:
+            host: data-service.otel-lab.svc.cluster.local
+            port: { number: 8002 }
+      timeout: 2s
+
+    - name: normal
+      route:
+        - destination:
+            host: data-service.otel-lab.svc.cluster.local
+            port: { number: 8002 }
+      timeout: 2s
+      retries:
+        attempts: 1
+        perTryTimeout: 1s
+        retryOn: reset,connect-failure

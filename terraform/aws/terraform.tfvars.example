@@ -2,8 +2,12 @@
 # Copiar a terraform.tfvars y completar. terraform.tfvars está en .gitignore.
 # ════════════════════════════════════════════════════════════════════════════
 
-# ── Obligatoria ─────────────────────────────────────────────────────────────
+# ── Obligatorias ────────────────────────────────────────────────────────────
 db_password = "cambiar-por-un-valor-seguro"
+
+# Perfil del AWS CLI. NO lo dejes en "default" si en este equipo hay
+# credenciales de otra cuenta: Terraform desplegaria sobre ella.
+aws_profile = "otel-lab"
 
 # ── Opcionales (valores por defecto) ────────────────────────────────────────
 region       = "us-east-1"

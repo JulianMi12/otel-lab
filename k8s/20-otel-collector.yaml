@@ -1,0 +1,139 @@
+# ════════════════════════════════════════════════════════════════════════════
+# OpenTelemetry Collector — Deployment central del cluster
+#
+# En Cloud Run el Collector va como sidecar: cada revision lleva el suyo
+# porque no existe red interna estable entre servicios. En Kubernetes se
+# despliega una sola vez como Deployment y los tres servicios le escriben por
+# DNS interno. La diferencia no es cosmetica: aqui el Collector tambien recibe
+# las trazas y los logs de acceso que generan los sidecars de Istio, de modo
+# que es el unico punto por el que pasan las señales de la aplicacion y las
+# de la malla.
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: otel-lab
+  annotations:
+    # Workload Identity: enlaza esta SA de Kubernetes con la de GCP que tiene
+    # roles/cloudtrace.agent, logging.logWriter y monitoring.metricWriter.
+    # Terraform sustituye el valor real; el placeholder evita aplicar por
+    # error con un proyecto equivocado.
+    iam.gke.io/gcp-service-account: PROYECTO_PENDIENTE
+---
+# El procesador k8sattributes consulta la API de Kubernetes para saber a que
+# Pod pertenece cada span. Sin estos permisos el Collector arranca pero las
+# señales llegan sin k8s.pod.name ni k8s.deployment.name, que es justo lo que
+# diferencia una traza util de una anonima en un cluster.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector
+    namespace: otel-lab
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: otel-lab
+  labels: { app: otel-collector }
+spec:
+  selector: { app: otel-collector }
+  ports:
+    - name: grpc-otlp
+      port: 4317
+      targetPort: 4317
+      appProtocol: grpc
+    - name: http-otlp
+      port: 4318
+      targetPort: 4318
+    - name: http-metrics
+      port: 8888
+      targetPort: 8888
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: otel-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: otel-collector }
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+      annotations:
+        # El Collector queda fuera de la malla a proposito. Si llevara
+        # sidecar, los spans del propio sidecar se exportarian a traves del
+        # Collector que los genera: un bucle de telemetria que infla el
+        # trafico y confunde el grafo de servicios de Kiali.
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: otel-collector
+      containers:
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.109.0
+          args: ["--config=/etc/otel/collector-gke.yaml"]
+          env:
+            - name: GCP_PROJECT_ID
+              valueFrom:
+                configMapKeyRef: { name: gcp-config, key: project_id }
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef: { name: app-config, key: ENVIRONMENT }
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+          ports:
+            - containerPort: 4317
+              name: grpc-otlp
+            - containerPort: 4318
+              name: http-otlp
+            - containerPort: 8888
+              name: http-metrics
+            - containerPort: 13133
+              name: http-health
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+          livenessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            # El limite de memoria debe quedar por encima del limit_mib del
+            # memory_limiter (768 MiB), si no el kernel mata el contenedor
+            # antes de que el propio Collector pueda aplicar contrapresion.
+            requests: { cpu: 200m, memory: 512Mi }
+            limits:   { cpu: "1",  memory: 1Gi }
+      volumes:
+        - name: config
+          configMap: { name: otel-collector-config }

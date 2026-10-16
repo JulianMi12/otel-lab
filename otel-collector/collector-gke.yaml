@@ -1,0 +1,184 @@
+# ════════════════════════════════════════════════════════════════════════════
+# OpenTelemetry Collector — GKE con malla Istio
+#
+# Diferencias frente a collector-gcp.yaml (Cloud Run):
+#
+#   1. k8sattributes. En Cloud Run el `resourcedetection` basta porque cada
+#      revision es una unidad. En Kubernetes hace falta saber de que Pod,
+#      nodo y Deployment viene cada señal; sin ese procesador, todas las
+#      trazas del cluster parecen venir del mismo sitio.
+#
+#   2. Dos origenes de trazas, no uno. Llegan las de la aplicacion (SDK de
+#      OTel) y las de los sidecars Envoy (Istio). El procesador
+#      `attributes/origen` las marca para poder compararlas: el span de Envoy
+#      mide la latencia vista por la red, el de la aplicacion la vista por el
+#      proceso, y la resta es tiempo de proxy mas encolado.
+#
+#   3. Logs de acceso L7. Istio los envia por OTLP al mismo endpoint, asi que
+#      no hace falta receptor nuevo; alimentan el panel de seguridad del
+#      Modulo C (codigos de respuesta, mTLS, identidad del llamante).
+# ════════════════════════════════════════════════════════════════════════════
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 32
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Metricas del plano de datos de Istio. Cada Envoy expone estadisticas
+  # propias en :15020/stats/prometheus; de ahi salen las señales doradas de
+  # la malla sin que la aplicacion exporte nada.
+  prometheus/istio:
+    config:
+      scrape_configs:
+        - job_name: envoy-sidecars
+          scrape_interval: 30s
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            # Solo Pods con sidecar inyectado y en el namespace del lab.
+            - source_labels: [__meta_kubernetes_pod_container_name]
+              action: keep
+              regex: istio-proxy
+            - source_labels: [__meta_kubernetes_namespace]
+              action: keep
+              regex: otel-lab
+            - source_labels: [__address__]
+              action: replace
+              regex: ([^:]+)(?::\d+)?
+              replacement: $$1:15020
+              target_label: __address__
+            - source_labels: [__meta_kubernetes_pod_label_app]
+              target_label: app
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: pod
+          metrics_path: /stats/prometheus
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 768
+    spike_limit_mib: 192
+
+  # Debe ir antes que batch para que la consulta a la API de Kubernetes se
+  # haga con el contexto de red del lote original.
+  k8sattributes:
+    auth_type: serviceAccount
+    passthrough: false
+    extract:
+      metadata:
+        - k8s.namespace.name
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.deployment.name
+        - k8s.node.name
+      labels:
+        - tag_name: app
+          key: app
+          from: pod
+        - tag_name: service.version
+          key: version
+          from: pod
+    pod_association:
+      - sources:
+          - from: resource_attribute
+            name: k8s.pod.ip
+      - sources:
+          - from: connection
+
+  resourcedetection:
+    detectors: [env, gcp]
+    timeout: 10s
+    override: false
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: ${env:ENVIRONMENT}
+        action: upsert
+      - key: cloud.provider
+        value: gcp
+        action: upsert
+      - key: cloud.platform
+        value: gcp_kubernetes_engine
+        action: upsert
+      - key: mesh.name
+        value: istio
+        action: upsert
+
+  # Distingue el span del sidecar del span de la aplicacion. Istio nombra su
+  # servicio como "<app>.<ns>"; el SDK usa el nombre limpio del servicio.
+  attributes/origen:
+    actions:
+      - key: telemetry.origen
+        value: aplicacion
+        action: insert
+
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["http.route"] == "/health"'
+        - 'name == "GET /health"'
+        - 'attributes["http.url"] != nil and IsMatch(attributes["http.url"], ".*/health.*")'
+
+  transform/logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(severity_text, "INFO") where severity_number == 0
+
+  batch:
+    timeout: 1s
+    send_batch_size: 128
+    send_batch_max_size: 256
+
+exporters:
+  googlecloud:
+    project: ${env:GCP_PROJECT_ID}
+    log:
+      default_log_name: otel-lab-gke
+    trace:
+      endpoint: cloudtrace.googleapis.com:443
+
+  googlemanagedprometheus:
+    project: ${env:GCP_PROJECT_ID}
+
+  debug:
+    verbosity: normal
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, resourcedetection, resource, attributes/origen, filter/health, batch]
+      exporters: [googlecloud, debug]
+
+    # Sin `batch`: Managed Prometheus rechaza TimeSeries duplicadas dentro de
+    # un mismo lote. Es el mismo problema que ya aparecio en Cloud Run.
+    metrics:
+      receivers: [otlp, prometheus/istio]
+      processors: [memory_limiter, k8sattributes, resourcedetection, resource]
+      exporters: [googlemanagedprometheus]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes, resourcedetection, resource, transform/logs, batch]
+      exporters: [googlecloud]
+
+  telemetry:
+    logs:
+      level: info
+      encoding: json
+    metrics:
+      level: basic
+      address: 0.0.0.0:8888

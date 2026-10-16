@@ -1,0 +1,54 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Namespace del laboratorio
+#
+# La etiqueta istio-injection=enabled es lo que convierte este namespace en
+# parte de la malla: a partir de ella, cada Pod que se cree aqui recibe un
+# sidecar Envoy sin tocar ni una linea del Deployment. Esa es justamente la
+# propiedad que se quiere demostrar en el Modulo A: la observabilidad y el
+# control L7 se obtienen por infraestructura, no por codigo de aplicacion.
+# ════════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: otel-lab
+  labels:
+    istio-injection: enabled
+    app.kubernetes.io/part-of: otel-lab
+---
+# Credenciales de la base de datos. En un entorno real esto vendria de
+# Secret Manager via External Secrets; aqui se declara explicito para que el
+# laboratorio sea reproducible con un solo `kubectl apply`.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-credenciales
+  namespace: otel-lab
+type: Opaque
+stringData:
+  usuario: app
+  password: secret
+  base: appdb
+  url: postgresql://app:secret@postgres.otel-lab.svc.cluster.local:5432/appdb
+---
+# Parametros compartidos por los tres servicios. Separar el ConfigMap del
+# Deployment permite activar el caos del Modulo D con `kubectl patch` sobre un
+# unico objeto, en lugar de editar tres manifiestos.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: otel-lab
+data:
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.otel-lab.svc.cluster.local:4317
+  ENVIRONMENT: production
+  CLOUD_PROVIDER: gcp
+  APP_VERSION: 1.0.0
+  PROMETHEUS_PORT: "9464"
+  DB_NAME: appdb
+  SERVICE_B_URL: http://service-b.otel-lab.svc.cluster.local:8001
+  DATA_SERVICE_URL: http://data-service.otel-lab.svc.cluster.local:8002
+  # Caos desactivado en reposo. El Modulo D lo activa a nivel de aplicacion
+  # con `kubectl patch configmap`, o a nivel de malla con 50-chaos-istio.yaml.
+  CHAOS_LATENCY_MS: "0"
+  CHAOS_ERROR_RATE: "0"

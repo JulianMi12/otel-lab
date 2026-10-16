@@ -2,7 +2,15 @@
 
 **Laboratorio — Maestría en Arquitectura de Software · Observabilidad en Ambientes Productivos**
 
-Pipeline completo que captura las **tres señales** de observabilidad (métricas, logs y trazas distribuidas) desde dos microservicios instrumentados con el SDK de OpenTelemetry, las centraliza en un OTel Collector y las correlaciona a través del `trace_id` siguiendo el estándar W3C TraceContext.
+Pipeline completo que captura las **tres señales** de observabilidad (métricas, logs y trazas distribuidas) desde tres microservicios instrumentados con el SDK de OpenTelemetry, las centraliza en un OTel Collector y las correlaciona a través del `trace_id` siguiendo el estándar W3C TraceContext.
+
+El repositorio recoge los tres laboratorios de la asignatura, cada uno construido sobre el anterior:
+
+| Entrega | Contenido | Informe |
+|---|---|---|
+| **1 · Pipeline** | Instrumentación, correlación cross-signal y benchmark de sobrecarga | [`docs/reporte-tecnico.pdf`](docs/reporte-tecnico.pdf) |
+| **2 · Chaos Engineering** | Tres hipótesis de fallo y un Game Day con probes SOT/DuringChaos/EOT | [`chaos/plan-gameday.pdf`](chaos/plan-gameday.pdf) |
+| **3 · Integrador** | Tercer servicio, service mesh, detección de anomalías, seguridad de red y madurez | [`docs/reporte-integrador.pdf`](docs/reporte-integrador.pdf) |
 
 ---
 
@@ -66,9 +74,10 @@ de Docker es `services/`, por eso cada servicio puede acceder a `common/`.
 4. [Correlación cross-signal](#correlación-cross-signal)
 5. [Benchmark de overhead](#benchmark-de-overhead)
 6. [Despliegue en la nube](#despliegue-en-la-nube)
-7. [Estructura del repositorio](#estructura-del-repositorio)
-8. [Decisiones de diseño](#decisiones-de-diseño)
-9. [Resolución de problemas](#resolución-de-problemas)
+7. [Laboratorio integrador](#laboratorio-integrador)
+8. [Estructura del repositorio](#estructura-del-repositorio)
+9. [Decisiones de diseño](#decisiones-de-diseño)
+10. [Resolución de problemas](#resolución-de-problemas)
 
 ---
 
@@ -395,6 +404,74 @@ La estructura de pipelines (receivers, processors, orden de los procesadores) es
 
 ---
 
+## Laboratorio integrador
+
+La tercera entrega añade cinco bloques sobre el pipeline existente.
+
+### Tercer microservicio y service mesh
+
+`data-service` expone consultas analíticas con las *DB Semantic Conventions*
+completas. Sobre Kubernetes, **Istio open source** aporta mTLS estricto,
+autorización por identidad SPIFFE y resiliencia L7 declarativa, sin tocar el
+código de la aplicación.
+
+```bash
+./scripts/desplegar-gke.sh          # clúster + Istio + aplicación
+istioctl dashboard kiali            # grafo de servicios
+```
+
+Los manifiestos viven en [`k8s/`](k8s/) y la arquitectura está explicada en
+[`docs/service-mesh.md`](docs/service-mesh.md). Los valores de timeout,
+reintentos y *circuit breaker* no son genéricos: salen de los experimentos de
+caos de la entrega anterior.
+
+### Detección de anomalías
+
+Línea base móvil más correlación multi-señal, frente a umbrales fijos. Sobre un
+escenario controlado con una fase de ruido y una de incidente real:
+
+| Enfoque | Alertas | Útiles | Sin acción |
+|---|---:|---:|---:|
+| Umbral fijo p99 > 500 ms | 2 | 1 | 1 |
+| Umbral fijo p99 > 2000 ms | 2 | 1 | 1 |
+| **Baseline + correlación** | **1** | **1** | **0** |
+
+```bash
+./aiops/escenario.sh                                   # escenario completo
+python aiops/detector.py --minutos 60 --comparar       # sólo el análisis
+```
+
+Detalle en [`docs/aiops.md`](docs/aiops.md).
+
+### Observabilidad de red y seguridad
+
+Cuatro señales de seguridad —quién intenta entrar, quién pide de más, qué viaja
+sin cifrar, qué sale— construidas sobre VPC Flow Logs y logs de acceso L7, sin
+agentes nuevos. Definidas para las dos nubes en
+[`terraform/observabilidad/`](terraform/observabilidad/) y
+[`terraform/aws/seguridad.tf`](terraform/aws/seguridad.tf).
+
+### Cuarto experimento de caos
+
+E4 ataca una dependencia **opcional** para comprobar que la clasificación se
+sostiene bajo fallo real:
+
+```bash
+bash chaos/experimentos/e4-errores-data-service.sh
+```
+
+Con `data-service` fallando un 10 %, `/order` mantuvo el 100 % de disponibilidad
+y el cliente no vio ni un error. El experimento verifica el estado estable
+**dentro del SLO** antes de inyectar, y aborta si el sistema ya está degradado.
+
+### Autoevaluación de madurez
+
+Ocho dominios puntuados por lo que el sistema demostró bajo observación, no por
+lo que se construyó, más una hoja de ruta a tres meses:
+[`docs/madurez.md`](docs/madurez.md).
+
+---
+
 ## Estructura del repositorio
 
 ```
@@ -403,12 +480,23 @@ La estructura de pipelines (receivers, processors, orden de los procesadores) es
 ├── services/
 │   ├── requirements.txt             Dependencias compartidas, versiones fijadas
 │   ├── common/telemetry.py          Bootstrap de los 3 pilares + modo no-op
+│   ├── common/datastore.py          Backends intercambiables postgres/memoria
 │   ├── service-a/                   Orquestador
-│   └── service-b/                   Inventario
+│   ├── service-b/                   Inventario
+│   └── data-service/                Analítica (dependencia opcional)
 ├── otel-collector/
 │   ├── collector-local.yaml         Entorno local
 │   ├── collector-gcp.yaml           Cloud Run
+│   ├── collector-gke.yaml           Kubernetes + métricas de Istio
 │   └── collector-aws.yaml           ECS Fargate
+├── k8s/                             Malla de servicios (50- es el caos, aparte)
+│   ├── 30-servicios.yaml            Los tres Deployments
+│   ├── 41-istio-seguridad.yaml      mTLS estricto y denegación por defecto
+│   ├── 42-istio-resiliencia.yaml    Timeouts y circuit breakers
+│   └── istio/istio-operator.yaml    Perfil de instalación de la malla
+├── aiops/
+│   ├── detector.py                  Baseline móvil + correlación multi-señal
+│   └── escenario.sh                 Escenario con ruido e incidente real
 ├── observability/
 │   ├── prometheus/prometheus.yaml
 │   ├── loki/loki.yaml
@@ -420,14 +508,23 @@ La estructura de pipelines (receivers, processors, orden de los procesadores) es
 ├── benchmark/
 │   ├── load.js                      Script de carga k6
 │   └── analyze_overhead.py          Análisis comparativo
+├── chaos/
+│   ├── comun.sh                     Probes SOT / DuringChaos / EOT
+│   ├── generador_carga.py           Generador concurrente de un solo proceso
+│   └── experimentos/e1..e4          Un experimento por hipótesis
 ├── terraform/
 │   ├── gcp/                         Cloud Run + sidecar
-│   └── aws/                         ECS Fargate + sidecar
+│   ├── gke/                         Clúster para la malla (coste por hora)
+│   ├── aws/                         ECS Fargate + sidecar + Flow Logs
+│   └── observabilidad/              Alertas y paneles (Módulos B y C)
 ├── scripts/
 │   ├── init-db.sql                  Esquema y datos semilla
 │   ├── verify-pipeline.sh           Verificación cross-signal automatizada
 │   └── run-benchmark.sh             Orquestación del benchmark
 └── docs/
+    ├── service-mesh.md              Arquitectura de la malla
+    ├── aiops.md                     Detección de anomalías
+    ├── madurez.md                   Autoevaluación y hoja de ruta
     └── evidencias/                  Capturas de Jaeger, Grafana y dashboards
 ```
 

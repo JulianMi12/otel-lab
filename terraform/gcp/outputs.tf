@@ -15,6 +15,11 @@ output "service_b_url" {
   value       = google_cloud_run_v2_service.service_b.uri
 }
 
+output "data_service_url" {
+  description = "URL de data-service (protegido por IAM, no publico)"
+  value       = google_cloud_run_v2_service.data_service.uri
+}
+
 output "service_account" {
   description = "Service account que usan los servicios y el sidecar del Collector"
   value       = google_service_account.runtime.email

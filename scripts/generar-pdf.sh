@@ -15,8 +15,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-HTML="docs/reporte-tecnico.html"
-PDF="docs/reporte-tecnico.pdf"
+# Acepta el HTML como argumento para poder generar varios informes con el
+# mismo script. Sin argumento conserva el comportamiento anterior.
+HTML="${1:-docs/reporte-tecnico.html}"
+PDF="${HTML%.html}.pdf"
 
 if [[ ! -f "$HTML" ]]; then
   echo "No existe $HTML — ejecuta primero: python docs/generar_reporte.py"
