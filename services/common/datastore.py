@@ -202,10 +202,58 @@ class AlmacenPostgres:
         "FROM orders WHERE product = %s GROUP BY product"
     )
 
-    def __init__(self, dsn, minconn=2, maxconn=20):
+    def __init__(self, dsn, minconn=2, maxconn=20, inicializar=True):
         from psycopg2.pool import ThreadedConnectionPool
 
         self._pool = ThreadedConnectionPool(minconn=minconn, maxconn=maxconn, dsn=dsn)
+        if inicializar:
+            self._asegurar_esquema()
+
+    # Ruta del script de esquema, relativa a este archivo. En las imagenes de
+    # los servicios, `common/` vive junto al script.
+    _RUTA_ESQUEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "init-db.sql")
+
+    def _asegurar_esquema(self):
+        """
+        Crea el esquema y los datos semilla si todavia no existen.
+
+        En Docker Compose esto lo hacia PostgreSQL solo: el contenedor oficial
+        ejecuta lo que encuentre en /docker-entrypoint-initdb.d la primera vez
+        que crea el volumen. Las bases gestionadas -RDS, Cloud SQL- no tienen
+        ese mecanismo: Terraform crea la instancia vacia y nadie la inicializa.
+
+        El sintoma, al desplegar en ECS, fue este:
+
+            relation "orders" does not exist
+
+        Es decir, el laboratorio dependia de una particularidad de la imagen de
+        Docker para algo que la aplicacion necesita siempre. Hacer que el
+        propio servicio garantice su esquema es lo que permite que la MISMA
+        imagen funcione en Compose, en Cloud Run con Cloud SQL y en ECS con
+        RDS sin pasos manuales por entorno.
+
+        Todo el script es idempotente (CREATE TABLE IF NOT EXISTS, INSERT ...
+        ON CONFLICT DO NOTHING), asi que ejecutarlo en cada arranque es seguro
+        y no pisa datos existentes.
+        """
+        if not os.path.exists(self._RUTA_ESQUEMA):
+            return
+
+        with open(self._RUTA_ESQUEMA, encoding="utf-8") as fh:
+            sql = fh.read()
+
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            conn.commit()
+        except Exception:
+            # Si dos instancias arrancan a la vez, una puede chocar creando la
+            # misma tabla. No es un error que deba tumbar el servicio: la otra
+            # ya hizo el trabajo.
+            conn.rollback()
+        finally:
+            self._pool.putconn(conn)
 
     def obtener_pedido(self, pedido_id):
         conn = self._pool.getconn()

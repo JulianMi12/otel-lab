@@ -215,3 +215,35 @@ variable "habilitar_seguridad_avanzada" {
   type        = bool
   default     = false
 }
+
+# ── Acceso de personas ──────────────────────────────────────────────────────
+variable "usuarios" {
+  description = <<-EOT
+    Personas con acceso a la consola, como mapa de correo a nivel.
+    Niveles validos: "administrador" (crea y destruye infraestructura) y
+    "lectura" (inspecciona sin modificar).
+    Vacio por defecto: un usuario de consola es una credencial viva y no debe
+    existir mientras no haga falta.
+  EOT
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition = alltrue([
+      for nivel in values(var.usuarios) : contains(["administrador", "lectura"], nivel)
+    ])
+    error_message = "Cada usuario debe tener nivel \"administrador\" o \"lectura\"."
+  }
+}
+
+variable "zonas" {
+  description = <<-EOT
+    Zonas de disponibilidad, nombradas de forma explicita.
+    Si se deja vacio se consultan con `aws_availability_zones`. Fijarlas hace
+    el despliegue reproducible: el orden que devuelve esa API no esta
+    garantizado, y un apply posterior podia mover las subredes de zona sin que
+    nadie lo pidiera.
+  EOT
+  type        = list(string)
+  default     = []
+}

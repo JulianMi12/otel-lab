@@ -7,6 +7,20 @@
 -- Las dos tablas sostienen el flujo trazado:
 --   orders    → la consulta service-a
 --   inventory → la consulta service-b
+--
+-- NOTA SOBRE LA COPIA EN services/common/
+--
+-- Este archivo existe dos veces a proposito:
+--
+--   scripts/init-db.sql         lo monta docker-compose en el contenedor de
+--                               PostgreSQL (docker-entrypoint-initdb.d)
+--   services/common/init-db.sql viaja DENTRO de la imagen de los servicios y
+--                               lo ejecuta AlmacenPostgres al arrancar
+--
+-- La segunda copia es la que hace que el despliegue funcione contra bases
+-- gestionadas (RDS, Cloud SQL), que no tienen el mecanismo de inicializacion
+-- del contenedor oficial. Si se cambia una, hay que copiarla a la otra:
+--   cp scripts/init-db.sql services/common/init-db.sql
 -- ════════════════════════════════════════════════════════════════════════════
 
 CREATE TABLE IF NOT EXISTS orders (

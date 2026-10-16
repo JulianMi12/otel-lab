@@ -41,13 +41,26 @@ provider "aws" {
 # confirmar, antes de aplicar nada, que los recursos van a la cuenta correcta.
 data "aws_caller_identity" "actual" {}
 
+# La consulta de zonas se hace SOLO si no se nombran de forma explicita.
+#
+# El SCP de la organizacion deniega `ec2:DescribeAvailabilityZones` aunque
+# permita el resto de EC2, de modo que este data source tumbaba el plan entero
+# antes de crear nada. Nombrar las zonas en terraform.tfvars evita la llamada.
+#
+# No es solo un rodeo: fijar las zonas tambien hace el despliegue reproducible.
+# AWS no garantiza que el orden que devuelve esta API sea estable, asi que un
+# `apply` posterior podia mover las subredes de zona sin que nadie lo pidiera.
 data "aws_availability_zones" "disponibles" {
+  count = length(var.zonas) > 0 ? 0 : 1
+
   state = "available"
 }
 
 locals {
   nombre = var.project_name
-  azs    = slice(data.aws_availability_zones.disponibles.names, 0, var.az_count)
+  azs = length(var.zonas) > 0 ? var.zonas : slice(
+    data.aws_availability_zones.disponibles[0].names, 0, var.az_count
+  )
 
   # Distribucion imagen oficial del Collector de AWS. Incluye los exporters
   # awsxray, awsemf y awscloudwatchlogs preconfigurados y validados por AWS.

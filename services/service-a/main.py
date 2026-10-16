@@ -349,8 +349,19 @@ async def _token_identidad(audiencia):
             )
             resp.raise_for_status()
             token = resp.text.strip()
-    except Exception:
+    except Exception as exc:
         # Sin metadata server no estamos en GCP: es el caso local y no es error.
+        #
+        # Pero si SI estamos en GCP y la peticion falla, este `except` silencioso
+        # convierte un fallo de autenticacion en una llamada sin cabecera, que
+        # el destino rechaza con 403. El sintoma que se ve arriba es "service-b
+        # status 403" y la causa real queda enterrada aqui. Por eso se registra:
+        # un except que devuelve None sin dejar rastro es justo lo que hace que
+        # un problema de credenciales parezca un problema de permisos.
+        log.warning(
+            "No se pudo obtener token de identidad; la llamada saldra sin autorizacion",
+            extra={"audiencia": audiencia, "error": "%s: %s" % (type(exc).__name__, exc)},
+        )
         return None
 
     # Los tokens duran una hora; se renuevan con cinco minutos de margen.

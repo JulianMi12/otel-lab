@@ -106,8 +106,21 @@ exporters:
           - "^http_request_duration.*"
           - "^db_query_duration.*"
 
-  debug:
-    verbosity: basic
+  # Sin exporter de depuracion, a diferencia de las otras tres configuraciones.
+  #
+  # La distribucion de AWS del Collector no incluye `debug`: su lista de
+  # exporters validos es [awsemf prometheus file loadbalancing datadog
+  # prometheusremotewrite kafka awscloudwatchlogs signalfx logzio sapm logging
+  # otlp otlphttp awsxray]. Declararlo aunque no se use en ningun pipeline
+  # basta para que el Collector no arranque:
+  #
+  #   error decoding 'exporters': unknown type: "debug" for id: "debug"
+  #
+  # Y como el Collector es un contenedor esencial de la task, su fallo tumbaba
+  # la task entera: las tres quedaban en desired=1 running=0 sin mas pista que
+  # "Task failed to start". El equivalente aqui seria `logging`, pero no se
+  # anade porque no se usa: un exporter declarado y sin usar es superficie de
+  # fallo sin contrapartida.
 
 service:
   extensions: [health_check]
